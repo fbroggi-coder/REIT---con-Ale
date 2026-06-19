@@ -1765,7 +1765,7 @@
           console.error(
             "[dc-runtime] sibling fetch for <" + name + "/>:",
             url,
-            "has no <x-dc> block \u2014 not a Design Component."
+            "has no \u003cx-dc\u003e block \u2014 not a Design Component."
           );
           return;
         }
@@ -2389,7 +2389,7 @@
 </div>
 
 </x-dc>
-<script data-dc-script>
+<script type="text/x-dc" data-dc-script="">
 
 class Component extends DCLogic {
   state = { view:'landing', fundId:null, prices: {}, fxLive: null, loading: false, error: null, lastUpdate: null, pdfLoading: false, pdfMsg: null, pdfMsgKind: 'ok', honorarios: '', editModal: false, editFundId: null, editRows: [], editSaving: false, editMsg: '', filterSearch: '', filterMoneda: [], filterTipo: [], fundTab: 'detail', caucionTNA: '29' };
