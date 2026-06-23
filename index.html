@@ -565,10 +565,15 @@ async function cargarHoldings() {
 }
 
 async function cargarFxAyer() {
-  const hoy = new Date().toISOString().slice(0, 10);
-  const rows = await sbGet('/fx_history?fecha=lt.' + hoy + '&order=fecha.desc&limit=1');
-  if (rows.length > 0) return { mep: parseFloat(rows[0].mep) || 0, ccl: parseFloat(rows[0].ccl) || 0 };
-  return { mep: 0, ccl: 0 };
+  try {
+    const hoy = new Date().toISOString().slice(0, 10);
+    const rows = await sbGet('/fx_history?fecha=lt.' + hoy + '&order=fecha.desc&limit=1');
+    if (rows.length > 0) return { mep: parseFloat(rows[0].mep) || 0, ccl: parseFloat(rows[0].ccl) || 0 };
+    return { mep: 0, ccl: 0 };
+  } catch (e) {
+    console.warn('[iEB] cargarFxAyer error:', e.message);
+    return { mep: 0, ccl: 0 };
+  }
 }
 
 async function fetchLivePrecios() {
