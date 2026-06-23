@@ -1129,122 +1129,208 @@ async function parsePDF(arrayBuffer) {
   const pdfjs = await loadPDFJS();
   const pdf   = await pdfjs.getDocument({ data: arrayBuffer }).promise;
 
-  const all = [];
+  // ── Paso 1: extraer todos los ítems con posición ──────────────────
+  const allItems = [];
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const vp   = page.getViewport({ scale: 1 });
     const tc   = await page.getTextContent();
     tc.items.forEach(it => {
-      const text = it.str.trim();
-      if (!text) return;
-      all.push({ text, x: Math.round(it.transform[4]), y: Math.round(vp.height - it.transform[5]), pg: p });
+      allItems.push({
+        raw:  it.str,
+        text: it.str.trim(),
+        x:    Math.round(it.transform[4]),
+        y:    Math.round(vp.height - it.transform[5]),
+        pg:   p,
+      });
     });
   }
 
+  // ── Paso 2: agrupar ítems en "líneas" por y-coordinate ───────────
+  const lineMap = new Map();
+  for (const item of allItems) {
+    if (!item.text) continue;
+    let placed = false;
+    for (const [ky, arr] of lineMap) {
+      if (Math.abs(ky - item.y) <= 3) { arr.push(item); placed = true; break; }
+    }
+    if (!placed) lineMap.set(item.y, [item]);
+  }
+  const lines = [...lineMap.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([y, items]) => {
+      const sorted = items.sort((a, b) => a.x - b.x);
+      return { y, text: sorted.map(i => i.text).filter(Boolean).join(' '), items: sorted };
+    });
+
+  console.log('[PDF] páginas:', pdf.numPages, '| líneas totales:', lines.length);
+
   const res = { holdings: [], denomMap: {}, fecha: null, navCierre: null, cuotapartes: null, ajustes: [] };
 
-  // Fecha
-  const fullTxt = all.map(i => i.text).join(' ');
-  const fechaM = fullTxt.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
+  // ── Fecha ──────────────────────────────────────────────────────────
+  const fullText = lines.map(l => l.text).join('\n');
+  const fechaM = fullText.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
   if (fechaM) res.fecha = fechaM[1];
 
-  // NAV y cuotapartes
-  const detItem = all.find(i => i.text.startsWith('DETALLE DE LA GENERACION'));
-  if (detItem) {
-    const rowA = all.find(i => i.text === 'A' && i.y > detItem.y && i.y < detItem.y + 120);
-    if (rowA) {
-      const sameRow = all.filter(i => Math.abs(i.y - rowA.y) <= 4 && i.text !== 'A').sort((a,b) => a.x - b.x);
-      const nums = sameRow.map(i => parseArNum(i.text)).filter(n => n > 0);
-      if (nums.length >= 3) { res.cuotapartes = nums[1]; res.navCierre = nums[2]; }
+  // ── NAV y cuotapartes ─────────────────────────────────────────────
+  const numPat = /\d{1,3}(?:\.\d{3})*,\d+/g;
+  const detIdx = lines.findIndex(l => l.text.includes('DETALLE') && l.text.includes('GENERACION'));
+  if (detIdx !== -1) {
+    for (let i = detIdx + 1; i < Math.min(detIdx + 20, lines.length); i++) {
+      const l = lines[i];
+      if (/^A\b/.test(l.text)) {
+        const nums = [...l.text.matchAll(numPat)].map(m => parseArNum(m[0])).filter(n => n > 0);
+        if (nums.length >= 3) { res.cuotapartes = nums[1]; res.navCierre = nums[2]; }
+        break;
+      }
     }
   }
 
-  // Ajustes contables
+  // ── Ajustes contables ─────────────────────────────────────────────
   const ajusteSpec = [
-    { key: '(+) Disponibilidades',              pat: 'DISPONIBILIDADES',                  sign:  1 },
-    { key: '(+) Gastos diferidos (honorarios)', pat: 'GASTOS DIFERIDOS',                   sign:  1 },
-    { key: '(−) Provisiones',                   pat: 'PROVISIONES',                        sign: -1 },
-    { key: '(−) Acreedores por operaciones',    pat: 'ACREEDORES POR OPERACIONES A PAGAR', sign: -1 },
+    { key: '(+) Disponibilidades',              pat: 'DISPONIBILIDADES',   sign:  1 },
+    { key: '(+) Gastos diferidos (honorarios)', pat: 'GASTOS DIFERIDOS',    sign:  1 },
+    { key: '(−) Provisiones',                   pat: 'PROVISIONES',         sign: -1 },
+    { key: '(−) Acreedores por operaciones',    pat: 'ACREEDORES POR OPER', sign: -1 },
   ];
   for (const { key, pat, sign } of ajusteSpec) {
-    const lbl = all.find(i => i.text.startsWith(pat.substring(0, 14)));
-    if (!lbl) continue;
-    const numItem = all
-      .filter(i => Math.abs(i.y - lbl.y) <= 5 && i.x > lbl.x)
-      .sort((a,b) => a.x - b.x)
-      .find(i => /^[\d\.]+,[\d]+$/.test(i.text.replace(/[()]/g,'')));
-    if (numItem) res.ajustes.push({ label: key, val: parseArNum(numItem.text.replace(/[()]/g,'')) * sign });
+    const line = lines.find(l => l.text.toUpperCase().includes(pat));
+    if (!line) continue;
+    const nums = [...line.text.matchAll(numPat)];
+    if (nums.length) res.ajustes.push({ label: key, val: parseArNum(nums[nums.length-1][0]) * sign });
   }
 
-  // Tabla INVERSIONES — usando posiciones x de los encabezados
-  const invItem = all.find(i => i.text === 'INVERSIONES');
-  const totItem = all.find(i => i.y > (invItem?.y ?? 0) &&
-    (i.text === 'Total' || i.text.startsWith('Total Inversiones')));
-  if (!invItem || !totItem) return res;
+  // ── Sección INVERSIONES ───────────────────────────────────────────
+  const invIdx = lines.findIndex(l => /\bINVERSIONES\b/.test(l.text));
+  console.log('[PDF] INVERSIONES en línea:', invIdx, invIdx >= 0 ? lines[invIdx].text : 'NO ENCONTRADA');
 
-  const sec = all.filter(i => i.y > invItem.y + 2 && i.y < totItem.y - 2);
-
-  const hAbrev = sec.find(i => i.text === 'Abreviatura');
-  const hISIN  = sec.find(i => i.text === 'ISIN' || i.text.startsWith('ISIN'));
-  const hCotiz = sec.find(i => i.text === 'Cotización' || i.text.startsWith('Cotizaci'));
-  const hCant  = sec.find(i => i.text === 'Cantidad');
-  const hTot   = sec.find(i => i.text === 'Total');
-
-  const xAbrev = hAbrev?.x ?? 168;
-  const xISIN  = hISIN?.x  ?? 258;
-  const xCotiz = hCotiz?.x ?? 338;
-  const xCant  = hCant?.x  ?? 420;
-  const xTot   = hTot?.x   ?? 508;
-
-  const headerY    = Math.max(hAbrev?.y ?? 0, hCotiz?.y ?? 0, hCant?.y ?? 0);
-  const dataItems  = sec.filter(i => i.y > headerY + 3);
-
-  // Agrupar por fila
-  const rowMap = new Map();
-  for (const item of dataItems) {
-    let found = false;
-    for (const [ky] of rowMap) {
-      if (Math.abs(ky - item.y) <= 3) { rowMap.get(ky).push(item); found = true; break; }
+  let totIdx = -1;
+  for (let i = invIdx + 1; i < lines.length; i++) {
+    if (lines[i].text.includes('Total Inversiones') ||
+        (lines[i].text.startsWith('Total') && lines[i].text.match(/\d{8,}/))) {
+      totIdx = i; break;
     }
-    if (!found) rowMap.set(item.y, [item]);
   }
-  const rows = [...rowMap.entries()]
-    .sort((a,b) => a[0] - b[0])
-    .map(([y, items]) => ({ y, items: items.sort((a,b) => a.x - b.x) }));
+  console.log('[PDF] Total Inversiones en línea:', totIdx, totIdx >= 0 ? lines[totIdx].text.substring(0,60) : 'NO ENCONTRADA');
+
+  if (invIdx === -1 || totIdx === -1) {
+    console.warn('[PDF] No se encontró la sección INVERSIONES — primeras 20 líneas:',
+      lines.slice(0, 20).map(l => l.text.substring(0,60)));
+    return res;
+  }
+
+  // ── Posiciones x de las columnas (desde encabezados) ─────────────
+  let xAbrev = null, xISIN = null, xCotiz = null, xCant = null, xTot = null;
+  for (let i = invIdx; i < Math.min(invIdx + 6, totIdx); i++) {
+    const l = lines[i];
+    if (!xAbrev && l.text.includes('Abreviatura'))
+      xAbrev = l.items.find(it => it.text.includes('Abreviatura'))?.x;
+    if (!xISIN && l.text.includes('ISIN'))
+      xISIN = l.items.find(it => it.text.includes('ISIN'))?.x;
+    if (!xCotiz && (l.text.includes('Cotización') || l.text.includes('Cotizaci')))
+      xCotiz = l.items.find(it => it.text.includes('Cotizaci'))?.x;
+    if (!xCant && l.text.includes('Cantidad'))
+      xCant = l.items.find(it => it.text === 'Cantidad')?.x;
+    if (!xTot) {
+      const t = l.items.find(it => it.text === 'Total' && it.x > 400);
+      if (t) xTot = t.x;
+    }
+  }
+  console.log('[PDF] Columnas x:', { xAbrev, xISIN, xCotiz, xCant, xTot });
+
+  // Fallbacks si no se encontraron los encabezados
+  xAbrev = xAbrev ?? 168;
+  xISIN  = xISIN  ?? 258;
+  xCotiz = xCotiz ?? 338;
+  xCant  = xCant  ?? 420;
+  xTot   = xTot   ?? 508;
+
+  // ── Filas de datos ────────────────────────────────────────────────
+  // Línea de encabezado de columnas: la que tiene "Abreviatura"
+  const headerLineIdx = lines.slice(invIdx, invIdx + 6).findIndex(l => l.text.includes('Abreviatura'));
+  const skipY = headerLineIdx >= 0 ? lines[invIdx + headerLineIdx].y : null;
+
+  const dataLines = lines.slice(invIdx + 1, totIdx).filter(l => {
+    if (skipY && Math.abs(l.y - skipY) < 4) return false;
+    return ([...l.text.matchAll(numPat)] || []).length >= 2;
+  });
+
+  console.log('[PDF] Filas de datos:', dataLines.length);
 
   const usedTickers = new Set();
-  for (const row of rows) {
-    const inRange = (x1, x2) => row.items
-      .filter(i => i.x >= x1 - 12 && i.x < x2 + 12)
-      .map(i => i.text).join(' ').trim();
+  for (const line of dataLines) {
+    // ── Intento 1: extracción por columnas x ─────────────────────
+    const inRange = (x1, x2) => line.items
+      .filter(i => i.x >= x1 - 14 && i.x < x2 + 14)
+      .map(i => i.text).filter(Boolean).join(' ').trim();
 
     const denomStr = inRange(0,      xAbrev);
     let   ticker   = inRange(xAbrev, xISIN).replace(/^#/, '').trim();
     const cotizStr = inRange(xCotiz, xCant);
     const cantStr  = inRange(xCant,  xTot);
 
-    if (!ticker || !cotizStr || !cantStr) continue;
-    const cierre   = parseArNum(cotizStr);
-    const cantidad = parseArNum(cantStr);
-    if (cierre <= 0 || cantidad <= 0) continue;
+    let cierre = 0, cantidad = 0;
 
-    // Deduplicar (ej. tres instrumentos UMV2001700)
+    if (ticker && cotizStr && cantStr) {
+      cierre   = parseArNum(cotizStr);
+      cantidad = parseArNum(cantStr);
+    }
+
+    // ── Intento 2 (fallback): regex sobre texto completo de la línea
+    if (!ticker || cierre <= 0 || cantidad <= 0) {
+      const nums = [...line.text.matchAll(numPat)].map(m => m[0]);
+      if (nums.length < 3) {
+        console.log('[PDF] Skip (< 3 nums):', line.text.substring(0,80));
+        continue;
+      }
+      const cotN = nums[nums.length - 3];
+      const canN = nums[nums.length - 2];
+      cierre   = parseArNum(cotN);
+      cantidad = parseArNum(canN);
+
+      // Remover los 3 números del final para aislar la parte de texto
+      let textPart = line.text;
+      [nums[nums.length-1], nums[nums.length-2], nums[nums.length-3]].forEach(n => {
+        textPart = textPart.replace(n, ' ');
+      });
+      const words = textPart.trim().split(/\s+/).filter(w => w && w !== '-' && w !== '(');
+      if (!words.length) continue;
+
+      const lastW = words[words.length - 1];
+      const isISIN = /^[A-Z]{2}[A-Z0-9]{10}$/.test(lastW);
+      // "MM" es sufijo de tipo, no ticker
+      const isTypeCode = ['MM', 'BOND', 'FCI'].includes(lastW);
+
+      if (isISIN || isTypeCode) {
+        ticker = words[words.length - 2]?.replace(/^#/, '') || '';
+      } else {
+        ticker = lastW?.replace(/^#/, '') || '';
+      }
+    }
+
+    if (!ticker || cierre <= 0 || cantidad <= 0) continue;
+
+    // Deduplicar (ej. tres UMV2001700)
     if (usedTickers.has(ticker)) {
-      const fw = denomStr.split(/\s+/)[0]?.replace(/^#/, '') || '';
+      const fw = (denomStr || line.text).split(/\s+/)[0]?.replace(/^#/, '') || '';
       if (fw && fw !== ticker && !usedTickers.has(fw)) {
         ticker = fw;
       } else {
-        const cm = denomStr.match(/\((\d{5,})\)/);
+        const cm = (denomStr || line.text).match(/\((\d{5,})\)/);
         ticker = cm ? ticker + '_' + cm[1] : ticker + '_' + (usedTickers.size + 1);
       }
     }
+
     usedTickers.add(ticker);
-    res.denomMap[ticker] = denomStr.split(/[(\-]/)[0].trim().substring(0, 60);
+    res.denomMap[ticker] = (denomStr || line.text).split(/[(\-]/)[0].trim().substring(0, 60);
     res.holdings.push({ ticker, cierre, cantidad });
+    console.log('[PDF] Holding:', ticker, cierre, cantidad);
   }
 
+  console.log('[PDF] Total holdings:', res.holdings.length);
   return res;
 }
+
 
 function showPreviewModal(data) {
   _pdfPending = data;
