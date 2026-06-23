@@ -269,10 +269,143 @@
     .fund-cards { gap: 16px; }
     .fund-card { width: 100%; }
   }
+
+  /* ── MODAL SYSTEM ── */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.78);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 20px;
+    overflow-y: auto;
+  }
+  .modal-box {
+    background: #111113;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 16px;
+    width: 100%;
+    max-width: 620px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+  }
+  .modal-wide { max-width: 980px; }
+  .modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 22px 24px 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    flex-shrink: 0;
+  }
+  .modal-body {
+    padding: 20px 24px;
+    overflow-y: auto;
+    flex: 1;
+  }
+  .modal-footer {
+    padding: 14px 24px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .btn-primary {
+    background: #A6E635;
+    color: #0A0A0B;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 20px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 800;
+    cursor: pointer;
+    transition: opacity 0.15s;
+    white-space: nowrap;
+  }
+  .btn-primary:hover { opacity: 0.85; }
+  .btn-secondary {
+    background: rgba(255,255,255,0.06);
+    color: #D4D4D8;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    padding: 9px 20px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.15s;
+    white-space: nowrap;
+  }
+  .btn-secondary:hover { background: rgba(255,255,255,0.10); }
+
+  /* CMS table */
+  .cms-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .cms-table th {
+    padding: 8px 6px;
+    text-align: left;
+    font-size: 10px;
+    font-weight: 700;
+    color: #5A5A60;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .cms-table td { padding: 8px 6px; vertical-align: middle; }
+  .cms-input {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 6px;
+    color: #fff;
+    font-family: 'Manrope', sans-serif;
+    font-size: 12px;
+    padding: 5px 8px;
+    width: 100%;
+    min-width: 70px;
+  }
+  .cms-input:focus { outline: none; border-color: #A6E635; }
+  .cms-select {
+    background: #18181B;
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 6px;
+    color: #fff;
+    font-family: 'Manrope', sans-serif;
+    font-size: 11px;
+    padding: 5px 6px;
+    width: 100%;
+  }
+  .cms-select:focus { outline: none; border-color: #A6E635; }
+
+  /* Upload button */
+  .upload-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: #D4D4D8;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.15s;
+    user-select: none;
+  }
+  .upload-btn:hover { background: rgba(255,255,255,0.10); }
 </style>
 </head>
 <body>
 <div id="app"></div>
+<input type="file" id="pdf-input" accept=".pdf" style="display:none" onchange="handlePDFUpload(this.files[0])">
 
 <script>
 'use strict';
@@ -796,7 +929,7 @@ function renderFondo(fundId) {
   }).join('');
 
   // ── Ajustes rows ─────────────────────────────────────────────────
-  const ajusteRows = (cfg.ajustes || []).map(a => `
+  const ajusteRows = (AJUSTES[fundId] || []).map(a => `
     <tr>
       <td colspan="6" class="denom-cell">${a.label}</td>
       <td class="num" style="color:${a.val >= 0 ? '#9A9AA0' : '#D33A3F'}">${fARS(a.val)}</td>
@@ -837,6 +970,13 @@ function renderFondo(fundId) {
             <div class="metric-value">${fNum(cfg.cuotapartes)}</div>
           </div>
         </div>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
+        <label for="pdf-input" class="upload-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
+          Cargar PDF
+        </label>
       </div>
 
       <div class="table-wrap">
@@ -903,7 +1043,6 @@ async function init() {
   render(); // pantalla de carga
 
   try {
-    // Carga en paralelo: fondos (Supabase), meta por fondo, holdings, FX de ayer
     const [fundsConfig, meta, holdings, fxAyer] = await Promise.all([
       cargarFunds(),
       cargarMeta(),
@@ -915,17 +1054,15 @@ async function init() {
     state.holdings = holdings;
     state.fxAyer   = fxAyer.mep;
     state.loading  = false;
-    render(); // mostrar con precios de cierre mientras llegan los live
+    render();
 
-    // Precios live (puede ser lento)
     const live = await fetchLivePrecios();
-    state.fxLive   = live.fxLive;
-    state.canje    = live.canje;
+    state.fxLive    = live.fxLive;
+    state.canje     = live.canje;
     state.marketMap = live.marketMap;
     state.usMap     = live.usMap;
-    render(); // ahora con precios live
+    render();
 
-    // Refresh cada 60 segundos
     setInterval(async () => {
       const live = await fetchLivePrecios();
       state.fxLive    = live.fxLive;
@@ -937,12 +1074,467 @@ async function init() {
 
   } catch (e) {
     console.error('[iEB] init error:', e);
-    // Mostrar la landing igual aunque haya error parcial
     state.loading = false;
     if (Object.keys(FUNDS_CONFIG).length === 0) {
       state.error = e.message;
     }
     render();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// PDF UPLOAD + CMS ACTIVOS
+// ═══════════════════════════════════════════════════════════════════
+
+let _pdfPending = null;
+let _cmsData    = null;
+
+function loadPDFJS() {
+  return new Promise((resolve, reject) => {
+    if (window.pdfjsLib) { resolve(window.pdfjsLib); return; }
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload = () => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      resolve(window.pdfjsLib);
+    };
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+function showModal(html) {
+  let el = document.getElementById('modal-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'modal-overlay';
+    el.className = 'modal-overlay';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = html;
+  el.style.display = 'flex';
+  el.onclick = e => { if (e.target === el) closeModal(); };
+}
+function closeModal() {
+  const el = document.getElementById('modal-overlay');
+  if (el) el.style.display = 'none';
+}
+
+function parseArNum(s) {
+  return parseFloat(String(s || '').trim().replace(/\./g, '').replace(',', '.')) || 0;
+}
+
+async function parsePDF(arrayBuffer) {
+  const pdfjs = await loadPDFJS();
+  const pdf   = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+
+  const all = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const vp   = page.getViewport({ scale: 1 });
+    const tc   = await page.getTextContent();
+    tc.items.forEach(it => {
+      const text = it.str.trim();
+      if (!text) return;
+      all.push({ text, x: Math.round(it.transform[4]), y: Math.round(vp.height - it.transform[5]), pg: p });
+    });
+  }
+
+  const res = { holdings: [], denomMap: {}, fecha: null, navCierre: null, cuotapartes: null, ajustes: [] };
+
+  // Fecha
+  const fullTxt = all.map(i => i.text).join(' ');
+  const fechaM = fullTxt.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
+  if (fechaM) res.fecha = fechaM[1];
+
+  // NAV y cuotapartes
+  const detItem = all.find(i => i.text.startsWith('DETALLE DE LA GENERACION'));
+  if (detItem) {
+    const rowA = all.find(i => i.text === 'A' && i.y > detItem.y && i.y < detItem.y + 120);
+    if (rowA) {
+      const sameRow = all.filter(i => Math.abs(i.y - rowA.y) <= 4 && i.text !== 'A').sort((a,b) => a.x - b.x);
+      const nums = sameRow.map(i => parseArNum(i.text)).filter(n => n > 0);
+      if (nums.length >= 3) { res.cuotapartes = nums[1]; res.navCierre = nums[2]; }
+    }
+  }
+
+  // Ajustes contables
+  const ajusteSpec = [
+    { key: '(+) Disponibilidades',              pat: 'DISPONIBILIDADES',                  sign:  1 },
+    { key: '(+) Gastos diferidos (honorarios)', pat: 'GASTOS DIFERIDOS',                   sign:  1 },
+    { key: '(−) Provisiones',                   pat: 'PROVISIONES',                        sign: -1 },
+    { key: '(−) Acreedores por operaciones',    pat: 'ACREEDORES POR OPERACIONES A PAGAR', sign: -1 },
+  ];
+  for (const { key, pat, sign } of ajusteSpec) {
+    const lbl = all.find(i => i.text.startsWith(pat.substring(0, 14)));
+    if (!lbl) continue;
+    const numItem = all
+      .filter(i => Math.abs(i.y - lbl.y) <= 5 && i.x > lbl.x)
+      .sort((a,b) => a.x - b.x)
+      .find(i => /^[\d\.]+,[\d]+$/.test(i.text.replace(/[()]/g,'')));
+    if (numItem) res.ajustes.push({ label: key, val: parseArNum(numItem.text.replace(/[()]/g,'')) * sign });
+  }
+
+  // Tabla INVERSIONES — usando posiciones x de los encabezados
+  const invItem = all.find(i => i.text === 'INVERSIONES');
+  const totItem = all.find(i => i.y > (invItem?.y ?? 0) &&
+    (i.text === 'Total' || i.text.startsWith('Total Inversiones')));
+  if (!invItem || !totItem) return res;
+
+  const sec = all.filter(i => i.y > invItem.y + 2 && i.y < totItem.y - 2);
+
+  const hAbrev = sec.find(i => i.text === 'Abreviatura');
+  const hISIN  = sec.find(i => i.text === 'ISIN' || i.text.startsWith('ISIN'));
+  const hCotiz = sec.find(i => i.text === 'Cotización' || i.text.startsWith('Cotizaci'));
+  const hCant  = sec.find(i => i.text === 'Cantidad');
+  const hTot   = sec.find(i => i.text === 'Total');
+
+  const xAbrev = hAbrev?.x ?? 168;
+  const xISIN  = hISIN?.x  ?? 258;
+  const xCotiz = hCotiz?.x ?? 338;
+  const xCant  = hCant?.x  ?? 420;
+  const xTot   = hTot?.x   ?? 508;
+
+  const headerY    = Math.max(hAbrev?.y ?? 0, hCotiz?.y ?? 0, hCant?.y ?? 0);
+  const dataItems  = sec.filter(i => i.y > headerY + 3);
+
+  // Agrupar por fila
+  const rowMap = new Map();
+  for (const item of dataItems) {
+    let found = false;
+    for (const [ky] of rowMap) {
+      if (Math.abs(ky - item.y) <= 3) { rowMap.get(ky).push(item); found = true; break; }
+    }
+    if (!found) rowMap.set(item.y, [item]);
+  }
+  const rows = [...rowMap.entries()]
+    .sort((a,b) => a[0] - b[0])
+    .map(([y, items]) => ({ y, items: items.sort((a,b) => a.x - b.x) }));
+
+  const usedTickers = new Set();
+  for (const row of rows) {
+    const inRange = (x1, x2) => row.items
+      .filter(i => i.x >= x1 - 12 && i.x < x2 + 12)
+      .map(i => i.text).join(' ').trim();
+
+    const denomStr = inRange(0,      xAbrev);
+    let   ticker   = inRange(xAbrev, xISIN).replace(/^#/, '').trim();
+    const cotizStr = inRange(xCotiz, xCant);
+    const cantStr  = inRange(xCant,  xTot);
+
+    if (!ticker || !cotizStr || !cantStr) continue;
+    const cierre   = parseArNum(cotizStr);
+    const cantidad = parseArNum(cantStr);
+    if (cierre <= 0 || cantidad <= 0) continue;
+
+    // Deduplicar (ej. tres instrumentos UMV2001700)
+    if (usedTickers.has(ticker)) {
+      const fw = denomStr.split(/\s+/)[0]?.replace(/^#/, '') || '';
+      if (fw && fw !== ticker && !usedTickers.has(fw)) {
+        ticker = fw;
+      } else {
+        const cm = denomStr.match(/\((\d{5,})\)/);
+        ticker = cm ? ticker + '_' + cm[1] : ticker + '_' + (usedTickers.size + 1);
+      }
+    }
+    usedTickers.add(ticker);
+    res.denomMap[ticker] = denomStr.split(/[(\-]/)[0].trim().substring(0, 60);
+    res.holdings.push({ ticker, cierre, cantidad });
+  }
+
+  return res;
+}
+
+function showPreviewModal(data) {
+  _pdfPending = data;
+  const cfg = FUNDS_CONFIG[state.fundId];
+  const rows = data.holdings.map(h => `
+    <tr>
+      <td style="padding:7px 12px"><span class="ticker-chip">${h.ticker}</span></td>
+      <td style="padding:7px 12px;color:#9A9AA0;font-size:12px">${(data.denomMap[h.ticker] || '').substring(0,35)}</td>
+      <td style="padding:7px 12px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:12px">${fNum(h.cantidad)}</td>
+      <td style="padding:7px 12px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:12px">${f4(h.cierre)}</td>
+    </tr>`).join('');
+
+  const infoBar = data.navCierre ? `
+    <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px;padding:12px 16px;background:rgba(166,230,53,0.07);border-radius:8px;border:1px solid rgba(166,230,53,0.15)">
+      <div><div class="metric-label">Fecha</div><div style="font-weight:700">${data.fecha || '—'}</div></div>
+      <div><div class="metric-label">NAV cierre</div><div style="font-family:'JetBrains Mono',monospace;font-weight:700">${f4(data.navCierre)}</div></div>
+      <div><div class="metric-label">Cuotapartes</div><div style="font-family:'JetBrains Mono',monospace;font-weight:700">${data.cuotapartes ? fNum(data.cuotapartes) : '—'}</div></div>
+      <div><div class="metric-label">Instrumentos</div><div style="font-weight:700">${data.holdings.length}</div></div>
+    </div>` : '';
+
+  showModal(`
+    <div class="modal-box">
+      <div class="modal-header">
+        <div>
+          <div style="font-size:11px;color:#5A5A60;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Cargar PDF</div>
+          <div style="font-size:18px;font-weight:800">${cfg?.nombre || state.fundId}</div>
+        </div>
+        <button onclick="closeModal()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:26px;line-height:1;padding:0">×</button>
+      </div>
+      <div class="modal-body">
+        ${infoBar}
+        <p style="color:#9A9AA0;font-size:13px;margin-bottom:14px">Se detectaron <strong style="color:#fff">${data.holdings.length} instrumentos</strong>. Al confirmar se reemplazarán todos los holdings anteriores de este fondo.</p>
+        <div style="max-height:300px;overflow-y:auto;border-radius:8px;border:1px solid rgba(255,255,255,0.08)">
+          <table style="width:100%;border-collapse:collapse">
+            <thead>
+              <tr style="border-bottom:1px solid rgba(255,255,255,0.08)">
+                <th style="padding:8px 12px;text-align:left;font-size:10px;color:#5A5A60;font-weight:700;text-transform:uppercase">TICKER</th>
+                <th style="padding:8px 12px;text-align:left;font-size:10px;color:#5A5A60;font-weight:700;text-transform:uppercase">DENOMINACIÓN</th>
+                <th style="padding:8px 12px;text-align:right;font-size:10px;color:#5A5A60;font-weight:700;text-transform:uppercase">CANTIDAD</th>
+                <th style="padding:8px 12px;text-align:right;font-size:10px;color:#5A5A60;font-weight:700;text-transform:uppercase">CIERRE</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="closeModal()">Cancelar</button>
+        <button class="btn-primary" onclick="confirmarCargaPDF()">✓ Confirmar y guardar</button>
+      </div>
+    </div>`);
+}
+
+async function confirmarCargaPDF() {
+  const data   = _pdfPending;
+  const fundId = state.fundId;
+  if (!data || !fundId) return;
+
+  showModal(`<div class="modal-box" style="max-width:340px;padding:40px;text-align:center">
+    <div class="spinner" style="margin:0 auto 16px"></div>
+    <div style="color:#9A9AA0;font-size:14px;font-weight:600">Guardando holdings…</div>
+  </div>`);
+
+  try {
+    // 1. Borrar holdings anteriores de este fondo
+    const del = await fetch(`${SB_URL}/holdings?fund_id=eq.${fundId}`, { method: 'DELETE', headers: SB_HDR });
+    if (!del.ok && del.status !== 404) throw new Error('Error borrando holdings: ' + del.status);
+
+    // 2. Insertar nuevos
+    const newRows = data.holdings.map(h => ({ fund_id: fundId, ticker: h.ticker, cantidad: h.cantidad, cierre: h.cierre }));
+    const ins = await fetch(`${SB_URL}/holdings`, {
+      method: 'POST',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify(newRows),
+    });
+    if (!ins.ok) throw new Error('Error insertando holdings: ' + ins.status);
+
+    // 3. Actualizar funds
+    const patch = {};
+    if (data.navCierre)   patch.nav_cierre  = data.navCierre;
+    if (data.cuotapartes) patch.cuotapartes = data.cuotapartes;
+    if (data.fecha)       patch.pdf_date    = data.fecha;
+    if (Object.keys(patch).length) {
+      await fetch(`${SB_URL}/funds?id=eq.${fundId}`, {
+        method: 'PATCH',
+        headers: { ...SB_HDR, 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (FUNDS_CONFIG[fundId]) Object.assign(FUNDS_CONFIG[fundId], {
+        navCierre:   data.navCierre   ?? FUNDS_CONFIG[fundId].navCierre,
+        cuotapartes: data.cuotapartes ?? FUNDS_CONFIG[fundId].cuotapartes,
+        pdfDate:     data.fecha       ?? FUNDS_CONFIG[fundId].pdfDate,
+      });
+    }
+
+    // 4. Actualizar ajustes en memoria
+    if (data.ajustes && data.ajustes.length > 0) AJUSTES[fundId] = data.ajustes;
+
+    // 5. Actualizar state.holdings
+    state.holdings[fundId] = data.holdings.map(h => ({ ticker: h.ticker, cantidad: h.cantidad, cierre: h.cierre }));
+
+    // 6. Detectar tickers nuevos (no en activos_{fundId})
+    const tabla = ACTIVOS_TABLE[fundId];
+    let existing = new Set();
+    try {
+      const ac = await sbGet(`/${tabla}?select=ticker`);
+      existing = new Set(ac.map(a => a.ticker));
+    } catch(e) { /* vacía */ }
+
+    const nuevos = data.holdings.filter(h => !existing.has(h.ticker));
+    if (nuevos.length > 0) {
+      showActivosCMS(fundId, nuevos, data.denomMap);
+    } else {
+      closeModal();
+      render();
+    }
+  } catch(e) {
+    console.error('[iEB] confirmarCargaPDF:', e);
+    showModal(`<div class="modal-box" style="max-width:400px;padding:32px">
+      <div style="color:#D33A3F;font-size:15px;font-weight:700;margin-bottom:8px">Error al guardar</div>
+      <div style="color:#9A9AA0;font-size:13px;margin-bottom:20px">${e.message}</div>
+      <button class="btn-secondary" onclick="closeModal()">Cerrar</button>
+    </div>`);
+  }
+}
+
+function autoSuggest(ticker, denom) {
+  const t = ticker.toUpperCase();
+  const d = (denom || '').toUpperCase();
+  if (/^(AL|AO|GD|GE)\d+/.test(t))
+    return { fuente: 'data912_arg_bonds', moneda: 'USD', lamina: 100, tipo: 'Bono Soberano' };
+  if (/^(BALANDP|BAVSAP|BALAN|BAVSA)/.test(t) || d.includes('MONEY MARKET'))
+    return { fuente: 'calculo MM usd', moneda: 'USD', lamina: 1, tipo: 'Money Market USD' };
+  if (/^(UMV|PAGARE)/.test(t) || d.includes('UMV'))
+    return { fuente: 'calculo devengamiento', moneda: 'USD', lamina: 1, tipo: 'Pagaré HD' };
+  if (/^(M\d|T\d|TX|S\d|X\d|TTJ|TTS|TMG)/.test(t) && !d.includes('USD'))
+    return { fuente: 'data912_arg_notes', moneda: 'ARS', lamina: 1, tipo: 'Letra' };
+  if (d.includes('OBLIGACI') || /^(YPF|GALI|PAMPA|ON)/.test(t))
+    return { fuente: 'data912_arg_corp', moneda: 'USD', lamina: 100, tipo: 'ON Corporativa' };
+  return { fuente: 'hold', moneda: 'ARS', lamina: 1, tipo: 'Otros' };
+}
+
+function showActivosCMS(fundId, nuevos, denomMap) {
+  _cmsData = { fundId, nuevos, denomMap };
+
+  const TIPO_LISTA = [
+    'Bono Soberano','Letra','Letra CER','Bono','Bono TAMAR','Bono Dual',
+    'Bono CER','ON Corporativa','FCI MM USD','FCI MM ARS','Pagaré HD',
+    'Money Market USD','Fideicomiso','Otros',
+  ];
+  const FUENTE_LISTA = Object.keys(FUENTE_KIND);
+
+  const tableRows = nuevos.map((h, i) => {
+    const denom    = denomMap[h.ticker] || h.ticker;
+    const s        = autoSuggest(h.ticker, denom);
+    const tipoOpts = TIPO_LISTA.map(t => `<option value="${t}" ${t===s.tipo?'selected':''}>${t}</option>`).join('');
+    const fOpts    = FUENTE_LISTA.map(f => `<option value="${f}" ${f===s.fuente?'selected':''}>${f}</option>`).join('');
+    return `
+      <tr style="border-bottom:1px solid rgba(255,255,255,0.04)">
+        <td style="padding:8px 6px;white-space:nowrap">
+          <span class="ticker-chip" style="font-size:11px">${h.ticker}</span>
+          <div style="font-size:10px;color:#5A5A60;margin-top:3px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${denom.substring(0,28)}</div>
+        </td>
+        <td style="padding:8px 4px"><input class="cms-input" id="c-nom-${i}" value="${denom.substring(0,40)}" placeholder="Nombre" style="min-width:130px"></td>
+        <td style="padding:8px 4px"><select class="cms-select" id="c-tip-${i}" style="min-width:110px">${tipoOpts}</select></td>
+        <td style="padding:8px 4px">
+          <select class="cms-select" id="c-mon-${i}" style="min-width:64px">
+            <option value="ARS" ${s.moneda==='ARS'?'selected':''}>ARS</option>
+            <option value="USD" ${s.moneda==='USD'?'selected':''}>USD</option>
+          </select>
+        </td>
+        <td style="padding:8px 4px"><select class="cms-select" id="c-fue-${i}" style="min-width:165px">${fOpts}</select></td>
+        <td style="padding:8px 4px"><input class="cms-input" id="c-sym-${i}" value="${h.ticker}" placeholder="Symbol" style="width:88px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
+        <td style="padding:8px 4px"><input class="cms-input" id="c-tas-${i}" value="" placeholder="TNA%" style="width:66px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
+        <td style="padding:8px 4px"><input class="cms-input" id="c-lam-${i}" value="${s.lamina}" placeholder="Lámina" style="width:70px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
+      </tr>`;
+  }).join('');
+
+  showModal(`
+    <div class="modal-box modal-wide">
+      <div class="modal-header">
+        <div>
+          <div style="font-size:11px;color:#A6E635;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Nuevos activos detectados</div>
+          <div style="font-size:18px;font-weight:800">${nuevos.length} instrumento${nuevos.length>1?'s':''} sin registrar</div>
+        </div>
+        <button onclick="saltarCMS()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:13px;font-weight:600">Saltar →</button>
+      </div>
+      <div class="modal-body">
+        <p style="color:#9A9AA0;font-size:13px;margin-bottom:16px">Completá los datos para calcular precios. Los campos <span style="color:#A6E635">fuente precio</span> y <span style="color:#A6E635">lámina</span> son los más importantes.</p>
+        <div style="overflow-x:auto">
+          <table class="cms-table">
+            <thead>
+              <tr>
+                <th>Ticker</th><th>Nombre</th><th>Tipo</th><th>Moneda</th>
+                <th>Fuente precio ★</th><th>Live symbol</th><th>TNA %</th><th>Lámina ★</th>
+              </tr>
+            </thead>
+            <tbody>${tableRows}</tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="saltarCMS()">Saltar</button>
+        <button class="btn-primary" onclick="guardarNuevosActivos()">💾 Guardar activos</button>
+      </div>
+    </div>`);
+}
+
+function saltarCMS() { closeModal(); render(); }
+
+async function guardarNuevosActivos() {
+  if (!_cmsData) return;
+  const { fundId, nuevos } = _cmsData;
+  const tabla = ACTIVOS_TABLE[fundId];
+
+  const rows = nuevos.map((h, i) => ({
+    ticker:        h.ticker,
+    nombre:        document.getElementById(`c-nom-${i}`)?.value?.trim() || h.ticker,
+    tipo_activo:   document.getElementById(`c-tip-${i}`)?.value || 'Otros',
+    moneda:        document.getElementById(`c-mon-${i}`)?.value || 'ARS',
+    fuente_precio: document.getElementById(`c-fue-${i}`)?.value || 'hold',
+    live_symbol:   document.getElementById(`c-sym-${i}`)?.value?.trim() || h.ticker,
+    tasa:          parseFloat(document.getElementById(`c-tas-${i}`)?.value) || null,
+    lamina:        parseFloat(document.getElementById(`c-lam-${i}`)?.value) || 1,
+  }));
+
+  showModal(`<div class="modal-box" style="max-width:340px;padding:40px;text-align:center">
+    <div class="spinner" style="margin:0 auto 16px"></div>
+    <div style="color:#9A9AA0;font-size:14px;font-weight:600">Guardando activos…</div>
+  </div>`);
+
+  try {
+    const resp = await fetch(`${SB_URL}/${tabla}`, {
+      method: 'POST',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify(rows),
+    });
+    if (!resp.ok) throw new Error('Error insertando activos: ' + resp.status + ' ' + await resp.text());
+
+    // Actualizar meta en memoria
+    if (!state.meta[fundId]) state.meta[fundId] = {};
+    for (const r of rows) {
+      const kind = FUENTE_KIND[r.fuente_precio] || 'hold';
+      state.meta[fundId][r.ticker] = {
+        denom: r.nombre, tipo: r.tipo_activo, moneda: r.moneda,
+        fuente: r.fuente_precio, kind,
+        liveSymbol: r.live_symbol || r.ticker,
+        tasa: r.tasa, lamina: r.lamina || 1,
+      };
+    }
+    closeModal();
+    render();
+  } catch(e) {
+    console.error('[iEB] guardarNuevosActivos:', e);
+    showModal(`<div class="modal-box" style="max-width:400px;padding:32px">
+      <div style="color:#D33A3F;font-size:15px;font-weight:700;margin-bottom:8px">Error al guardar</div>
+      <div style="color:#9A9AA0;font-size:13px;margin-bottom:20px">${e.message}</div>
+      <button class="btn-secondary" onclick="closeModal()">Cerrar</button>
+    </div>`);
+  }
+}
+
+async function handlePDFUpload(file) {
+  if (!file) return;
+  document.getElementById('pdf-input').value = '';
+
+  showModal(`<div class="modal-box" style="max-width:340px;padding:40px;text-align:center">
+    <div class="spinner" style="margin:0 auto 16px"></div>
+    <div style="color:#9A9AA0;font-size:14px;font-weight:600">Leyendo PDF…</div>
+  </div>`);
+
+  try {
+    const buf  = await file.arrayBuffer();
+    const data = await parsePDF(buf);
+    if (!data.holdings.length) {
+      showModal(`<div class="modal-box" style="max-width:420px;padding:32px">
+        <div style="color:#D33A3F;font-size:15px;font-weight:700;margin-bottom:8px">No se encontraron inversiones</div>
+        <div style="color:#9A9AA0;font-size:13px;margin-bottom:20px">Verificá que sea un "Provisorio del Valor Cuotaparte".</div>
+        <button class="btn-secondary" onclick="closeModal()">Cerrar</button>
+      </div>`);
+      return;
+    }
+    showPreviewModal(data);
+  } catch(e) {
+    console.error('[iEB] handlePDFUpload:', e);
+    showModal(`<div class="modal-box" style="max-width:420px;padding:32px">
+      <div style="color:#D33A3F;font-size:15px;font-weight:700;margin-bottom:8px">Error al leer el PDF</div>
+      <div style="color:#9A9AA0;font-size:13px;margin-bottom:20px">${e.message}</div>
+      <button class="btn-secondary" onclick="closeModal()">Cerrar</button>
+    </div>`);
   }
 }
 
