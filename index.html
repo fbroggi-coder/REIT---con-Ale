@@ -546,17 +546,22 @@ async function cargarMeta() {
 }
 
 async function cargarHoldings() {
-  const rows = await sbGet('/holdings?select=fund_id,ticker,cantidad,cierre&order=fund_id.asc');
-  const out = {};
-  for (const r of rows) {
-    if (!out[r.fund_id]) out[r.fund_id] = [];
-    out[r.fund_id].push({
-      ticker:   r.ticker,
-      cantidad: parseFloat(r.cantidad),
-      cierre:   parseFloat(r.cierre),
-    });
+  try {
+    const rows = await sbGet('/holdings?select=fund_id,ticker,cantidad,cierre&order=fund_id.asc');
+    const out = {};
+    for (const r of rows) {
+      if (!out[r.fund_id]) out[r.fund_id] = [];
+      out[r.fund_id].push({
+        ticker:   r.ticker,
+        cantidad: parseFloat(r.cantidad),
+        cierre:   parseFloat(r.cierre),
+      });
+    }
+    return out;
+  } catch (e) {
+    console.warn('[iEB] cargarHoldings error:', e.message);
+    return {};
   }
-  return out;
 }
 
 async function cargarFxAyer() {
@@ -927,8 +932,11 @@ async function init() {
 
   } catch (e) {
     console.error('[iEB] init error:', e);
-    state.error   = e.message;
+    // Mostrar la landing igual aunque haya error parcial
     state.loading = false;
+    if (Object.keys(FUNDS_CONFIG).length === 0) {
+      state.error = e.message;
+    }
     render();
   }
 }
