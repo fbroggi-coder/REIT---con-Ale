@@ -1137,7 +1137,7 @@ async function parsePDF(arrayBuffer) {
     const tc   = await page.getTextContent();
     tc.items.forEach(it => {
       allItems.push({ text: it.str.trim(), x: Math.round(it.transform[4]),
-                      y: Math.round(vp.height - it.transform[5]), pg: p });
+                      y: Math.round(vp.height - it.transform[5]) + (p - 1) * 10000, pg: p });
     });
   }
 
@@ -1226,8 +1226,8 @@ async function parsePDF(arrayBuffer) {
     const t = lines[i].text.trim();
     if (t.startsWith('Total Inversiones') ||
         (t.startsWith('Total') && /\d{9,}/.test(t.replace(/\./g, '').replace(/,/g, ''))) ||
-        t.startsWith('(1) Sobre') || t.startsWith('MONEDAS') ||
-        t.includes('Todos los importes')) {
+        (!isCicloNova && (t.startsWith('(1) Sobre') || t.startsWith('MONEDAS') || t.includes('Todos los importes'))) ||
+        (isCicloNova && (t === 'Disponibilidades' || /^Clase (A|B|Ley)$/.test(t) || t.startsWith('La Duration')))) {
       totIdx = i; break;
     }
   }
