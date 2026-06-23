@@ -821,6 +821,11 @@ function render() {
   }
   if (state.view === 'landing') {
     root.innerHTML = renderLanding();
+  } else if (state.view === 'activos') {
+    root.innerHTML = renderActivosPage(state.fundId);
+    bindEvents();
+    cargarActivosTabla(state.fundId);
+    return;
   } else {
     root.innerHTML = renderFondo(state.fundId);
   }
@@ -972,7 +977,11 @@ function renderFondo(fundId) {
         </div>
       </div>
 
-      <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-bottom:14px">
+        <button data-action="activos" data-id="${fundId}" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="15" x2="12" y2="15"/></svg>
+          Activos
+        </button>
         <label for="pdf-input" class="upload-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
           Cargar PDF
@@ -1029,6 +1038,13 @@ function bindEvents() {
         render();
       } else if (action === 'landing') {
         state.view = 'landing';
+        render();
+      } else if (action === 'activos') {
+        state.view   = 'activos';
+        state.fundId = el.dataset.id || state.fundId;
+        render();
+      } else if (action === 'fund') {
+        state.view = 'fund';
         render();
       }
     });
@@ -1441,26 +1457,60 @@ async function confirmarCargaPDF() {
 function autoSuggest(ticker, denom) {
   const t = ticker.toUpperCase();
   const d = (denom || '').toUpperCase();
+  // Soberanos hard dollar (AL30, AO27, GD, GE…)
   if (/^(AL|AO|GD|GE)\d+/.test(t))
-    return { fuente: 'data912_arg_bonds', moneda: 'USD', lamina: 100, tipo: 'Bono Soberano' };
-  if (/^(BALANDP|BAVSAP|BALAN|BAVSA)/.test(t) || d.includes('MONEY MARKET'))
+    return { fuente: 'data912_arg_bonds', moneda: 'USD', lamina: 100, tipo: 'Soberano HD' };
+  // Soberanos dólar linked (con D al final)
+  if (/^(T\w+D|AL\w+D|AO\w+D)$/.test(t) && t.endsWith('D'))
+    return { fuente: 'data912_arg_bonds', moneda: 'USD', lamina: 1, tipo: 'Soberano DL' };
+  // Soberanos ARS (letras, boncaps, boncer)
+  if (/^(M\d|T\d|TX|S\d|X\d|TTJ|TTS|TMG|TZX|TZV)/.test(t) && !t.endsWith('D'))
+    return { fuente: 'data912_arg_notes', moneda: 'ARS', lamina: 1, tipo: 'Soberanos ARS' };
+  // Money Market USD
+  if (/^(BALANDP|BAVSAP|BALAN|BAVSA|ADCAP|ALLARIA|ARGENFUNDS|IAM|BAVSA|TT)/.test(t) || d.includes('MONEY MARKET') || d.includes('LIQUIDEZ DOLAR'))
     return { fuente: 'calculo MM usd', moneda: 'USD', lamina: 1, tipo: 'Money Market USD' };
-  if (/^(UMV|PAGARE)/.test(t) || d.includes('UMV'))
-    return { fuente: 'calculo devengamiento', moneda: 'USD', lamina: 1, tipo: 'Pagaré HD' };
-  if (/^(M\d|T\d|TX|S\d|X\d|TTJ|TTS|TMG)/.test(t) && !d.includes('USD'))
-    return { fuente: 'data912_arg_notes', moneda: 'ARS', lamina: 1, tipo: 'Letra' };
-  if (d.includes('OBLIGACI') || /^(YPF|GALI|PAMPA|ON)/.test(t))
-    return { fuente: 'data912_arg_corp', moneda: 'USD', lamina: 100, tipo: 'ON Corporativa' };
-  return { fuente: 'hold', moneda: 'ARS', lamina: 1, tipo: 'Otros' };
+  // Money Market ARS
+  if (d.includes('LIQUIDEZ PESOS') || d.includes('MONEY MARKET ARS') || d.includes('AHORRO PESOS'))
+    return { fuente: 'calculo MM ars', moneda: 'ARS', lamina: 1, tipo: 'Money Market ARS' };
+  // Pagares USD (UMV / cheques dólar)
+  if (/^(UMV|#UMV|PAGARE)/.test(t) || d.includes('UMV') || d.includes('PAGARÉ'))
+    return { fuente: 'calculo devengamiento', moneda: 'USD', lamina: 1, tipo: 'Pagare USD' };
+  // Pagares ARS (cheques pesos)
+  if (/^#?MAV/.test(t))
+    return { fuente: 'calculo devengamiento', moneda: 'ARS', lamina: 1, tipo: 'Pagare ARS' };
+  // ONs hard dollar / dólar cable
+  if (d.includes('ON ') || d.includes('OBLIGACI') || /^(YPF|BPCSD|GYC|HVS|JNC|MIC|MSSE|TLC|YM|TSC|CS5)/.test(t))
+    return { fuente: 'data912_arg_corp', moneda: 'USD', lamina: 100, tipo: 'ON HD' };
+  // Equity USA
+  if (d.includes(' US') || /^(AEHR|ANET|APLD|BN|COHR|CRNT|EMR|ETN|LITE|MOD|MPC|NEE|NTR|NU|PLD|RBBN|ROK|TSSI|VLO|VRT|CORN|REET|SDSD|SIL|TBT|URA|WEAT|LOMA|TGS)$/.test(t))
+    return { fuente: 'hold', moneda: 'USD', lamina: 1, tipo: 'Equity USA' };
+  // CEDEARs / ADRs → Equity USA (listed on US)
+  if (d.includes('CEDEAR') || d.includes('ADR') || /^(CLSD|COPXD|EWZD|GLDD|NUD|PSXD|VISTD|VSTD)$/.test(t))
+    return { fuente: 'hold', moneda: 'USD', lamina: 1, tipo: 'Equity USA' };
+  // Equity Argentina
+  if (d.includes('ARGENTINA') || /^(A3D|ALUAD|BBARD|CEPUD|ECOGD|IEBD|PAMPD|TGSUD|GGAL|YPFD)/.test(t))
+    return { fuente: 'hold', moneda: 'USD', lamina: 1, tipo: 'Equity Argentina' };
+  // Commodities ETF
+  if (/^(CORN|WEAT|SIL|URA|GLD|PDBC)/.test(t))
+    return { fuente: 'hold', moneda: 'USD', lamina: 1, tipo: 'Commodities' };
+  // Options (covered call / compra call / venta call)
+  if (/^.*P\d+[A-Z]\d+$/.test(t) || d.includes('OPCION') || d.includes('OPTION'))
+    return { fuente: 'hold', moneda: 'USD', lamina: 1, tipo: 'Covered Call' };
+  return { fuente: 'hold', moneda: 'USD', lamina: 1, tipo: 'Equity USA' };
 }
 
 function showActivosCMS(fundId, nuevos, denomMap) {
   _cmsData = { fundId, nuevos, denomMap };
 
   const TIPO_LISTA = [
-    'Bono Soberano','Letra','Letra CER','Bono','Bono TAMAR','Bono Dual',
-    'Bono CER','ON Corporativa','FCI MM USD','FCI MM ARS','Pagaré HD',
-    'Money Market USD','Fideicomiso','Otros',
+    'Commodities','Compra Call','Covered Call','Equity Argentina','Equity USA',
+    'Money Market ARS','Money Market USD','ON DL','ON HD',
+    'Pagare ARS','Pagare USD','Short Equity','Short Renta Fija',
+    'Soberano DL','Soberano HD','Soberanos ARS','Venta Call',
+  ];
+  const CATEGORIA_LISTA = [
+    'Commodities','Compra Call','Covered Call','Equity','Liquidez',
+    'Renta Fija','Short Equity','Short Renta Fija','Venta Call',
   ];
   const FUENTE_LISTA = Object.keys(FUENTE_KIND);
 
@@ -1468,6 +1518,7 @@ function showActivosCMS(fundId, nuevos, denomMap) {
     const denom    = denomMap[h.ticker] || h.ticker;
     const s        = autoSuggest(h.ticker, denom);
     const tipoOpts = TIPO_LISTA.map(t => `<option value="${t}" ${t===s.tipo?'selected':''}>${t}</option>`).join('');
+    const catOpts  = CATEGORIA_LISTA.map(c => `<option value="${c}">${c}</option>`).join('');
     const fOpts    = FUENTE_LISTA.map(f => `<option value="${f}" ${f===s.fuente?'selected':''}>${f}</option>`).join('');
     return `
       <tr style="border-bottom:1px solid rgba(255,255,255,0.04)">
@@ -1476,7 +1527,8 @@ function showActivosCMS(fundId, nuevos, denomMap) {
           <div style="font-size:10px;color:#5A5A60;margin-top:3px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${denom.substring(0,28)}</div>
         </td>
         <td style="padding:8px 4px"><input class="cms-input" id="c-nom-${i}" value="${denom.substring(0,40)}" placeholder="Nombre" style="min-width:130px"></td>
-        <td style="padding:8px 4px"><select class="cms-select" id="c-tip-${i}" style="min-width:110px">${tipoOpts}</select></td>
+        <td style="padding:8px 4px"><select class="cms-select" id="c-tip-${i}" style="min-width:120px">${tipoOpts}</select></td>
+        <td style="padding:8px 4px"><select class="cms-select" id="c-cat-${i}" style="min-width:120px">${catOpts}</select></td>
         <td style="padding:8px 4px">
           <select class="cms-select" id="c-mon-${i}" style="min-width:64px">
             <option value="ARS" ${s.moneda==='ARS'?'selected':''}>ARS</option>
@@ -1487,7 +1539,8 @@ function showActivosCMS(fundId, nuevos, denomMap) {
         <td style="padding:8px 4px"><input class="cms-input" id="c-sym-${i}" value="${h.ticker}" placeholder="Symbol" style="width:88px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
         <td style="padding:8px 4px"><input class="cms-input" id="c-tas-${i}" value="" placeholder="TNA%" style="width:66px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
         <td style="padding:8px 4px"><input class="cms-input" id="c-lam-${i}" value="${s.lamina}" placeholder="Lámina" style="width:70px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
-      </tr>`;
+        <td style="padding:8px 4px"><input class="cms-input" id="c-bas-${i}" value="" placeholder="Base" style="width:90px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
+      </tr>\``;
   }).join('');
 
   showModal(`
@@ -1505,8 +1558,8 @@ function showActivosCMS(fundId, nuevos, denomMap) {
           <table class="cms-table">
             <thead>
               <tr>
-                <th>Ticker</th><th>Nombre</th><th>Tipo</th><th>Moneda</th>
-                <th>Fuente precio ★</th><th>Live symbol</th><th>TNA %</th><th>Lámina ★</th>
+                <th>Ticker</th><th>Nombre</th><th>Tipo</th><th>Categoría</th><th>Moneda</th>
+                <th>Fuente precio ★</th><th>Live symbol</th><th>TNA %</th><th>Lámina ★</th><th>Base</th>
               </tr>
             </thead>
             <tbody>${tableRows}</tbody>
@@ -1530,12 +1583,14 @@ async function guardarNuevosActivos() {
   const rows = nuevos.map((h, i) => ({
     ticker:        h.ticker,
     nombre:        document.getElementById(`c-nom-${i}`)?.value?.trim() || h.ticker,
-    tipo_activo:   document.getElementById(`c-tip-${i}`)?.value || 'Otros',
+    tipo_activo:   document.getElementById(`c-tip-${i}`)?.value || 'Equity USA',
+    categoria:     document.getElementById(`c-cat-${i}`)?.value || null,
     moneda:        document.getElementById(`c-mon-${i}`)?.value || 'ARS',
     fuente_precio: document.getElementById(`c-fue-${i}`)?.value || 'hold',
     live_symbol:   document.getElementById(`c-sym-${i}`)?.value?.trim() || h.ticker,
     tasa:          parseFloat(document.getElementById(`c-tas-${i}`)?.value) || null,
     lamina:        parseFloat(document.getElementById(`c-lam-${i}`)?.value) || 1,
+    base:          document.getElementById(`c-bas-${i}`)?.value?.trim() || null,
   }));
 
   showModal(`<div class="modal-box" style="max-width:340px;padding:40px;text-align:center">
@@ -1606,6 +1661,178 @@ async function handlePDFUpload(file) {
 }
 
 init();
+
+// ── ACTIVOS TABLE VIEW ──────────────────────────────────────────────
+function renderActivosPage(fundId) {
+  const cfg = FUNDS_CONFIG[fundId] || {};
+  return `
+    ${renderTopBar({ showBack: false })}
+    <div class="fund-page">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:24px">
+        <button data-action="fund" class="back-btn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#A6E635" stroke-width="2.6" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+          Volver a cartera
+        </button>
+        <div style="font-size:18px;font-weight:800">${cfg.nombre || fundId} · Activos</div>
+      </div>
+      <div class="table-wrap" id="activos-table-wrap">
+        <div class="center-msg" style="min-height:120px"><div class="spinner"></div><span>Cargando activos…</span></div>
+      </div>
+    </div>`;
+}
+
+async function cargarActivosTabla(fundId) {
+  const tabla = ACTIVOS_TABLE[fundId];
+  if (!tabla) return;
+  const wrap = document.getElementById('activos-table-wrap');
+  try {
+    const resp = await fetch(`${SB_URL}/${tabla}?select=*&order=ticker.asc`, { headers: SB_HDR });
+    if (!resp.ok) throw new Error(await resp.text());
+    const activos = await resp.json();
+
+    if (!activos.length) {
+      wrap.innerHTML = `<div class="center-msg" style="min-height:80px"><span style="color:#5A5A60">Sin activos cargados para este fondo.</span></div>`;
+      return;
+    }
+
+    const rows = activos.map(a => `
+      <tr>
+        <td><span class="ticker-chip">${a.ticker || ''}</span></td>
+        <td class="denom-cell" style="max-width:200px">${a.nombre || ''}</td>
+        <td>${a.tipo_activo || ''}</td>
+        <td>${a.categoria || ''}</td>
+        <td>
+          <span class="moneda-badge" style="background:${a.moneda==='USD'?'#ECFCCB':'#EDE9FE'};color:${a.moneda==='USD'?'#3F6212':'#5B21B6'}">${a.moneda || ''}</span>
+        </td>
+        <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#9A9AA0">${a.fuente_precio || ''}</td>
+        <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${a.lamina ?? ''}</td>
+        <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${a.base || ''}</td>
+        <td>
+          <button onclick="abrirEditarActivo('${fundId}','${a.ticker}')" style="background:rgba(166,230,53,0.1);border:1px solid rgba(166,230,53,0.25);color:#A6E635;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">Editar</button>
+        </td>
+      </tr>`).join('');
+
+    wrap.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Ticker</th><th>Nombre</th><th>Tipo</th><th>Categoría</th>
+            <th>Moneda</th><th>Fuente precio</th><th>Lámina</th><th>Base</th><th></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch(e) {
+    wrap.innerHTML = `<div class="center-msg" style="min-height:80px"><span style="color:#D33A3F">Error cargando activos: ${e.message}</span></div>`;
+  }
+}
+
+async function abrirEditarActivo(fundId, ticker) {
+  const tabla = ACTIVOS_TABLE[fundId];
+  let a = {};
+  try {
+    const r = await fetch(`${SB_URL}/${tabla}?ticker=eq.${encodeURIComponent(ticker)}&select=*`, { headers: SB_HDR });
+    const arr = await r.json();
+    a = arr[0] || {};
+  } catch(e) {}
+
+  const TIPO_LISTA_ED = ['Commodities', 'Compra Call', 'Covered Call', 'Equity Argentina', 'Equity USA', 'Money Market ARS', 'Money Market USD', 'ON DL', 'ON HD', 'Pagare ARS', 'Pagare USD', 'Short Equity', 'Short Renta Fija', 'Soberano DL', 'Soberano HD', 'Soberanos ARS', 'Venta Call'];
+  const CAT_LISTA_ED  = ['Commodities', 'Compra Call', 'Covered Call', 'Equity', 'Liquidez', 'Renta Fija', 'Short Equity', 'Short Renta Fija', 'Venta Call'];
+  const FUENTE_LISTA_ED = Object.keys(FUENTE_KIND);
+
+  const tipoOpts = TIPO_LISTA_ED.map(t => `<option value="${t}" ${t===a.tipo_activo?'selected':''}>${t}</option>`).join('');
+  const catOpts  = CAT_LISTA_ED.map(c => `<option value="${c}" ${c===a.categoria?'selected':''}>${c}</option>`).join('');
+  const fOpts    = FUENTE_LISTA_ED.map(f => `<option value="${f}" ${f===a.fuente_precio?'selected':''}>${f}</option>`).join('');
+
+  showModal(`
+    <div class="modal-box" style="max-width:500px">
+      <div class="modal-header">
+        <div>
+          <div style="font-size:11px;color:#A6E635;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Editar activo</div>
+          <div style="font-size:18px;font-weight:800">${ticker}</div>
+        </div>
+        <button onclick="closeModal()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:18px">✕</button>
+      </div>
+      <div class="modal-body" style="display:grid;gap:12px">
+        <div>
+          <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">NOMBRE</label>
+          <input class="cms-input" id="ed-nom" value="${a.nombre || ''}" style="width:100%">
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div>
+            <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">TIPO</label>
+            <select class="cms-select" id="ed-tip" style="width:100%">${tipoOpts}</select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">CATEGORÍA</label>
+            <select class="cms-select" id="ed-cat" style="width:100%"><option value="">—</option>${catOpts}</select>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div>
+            <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">MONEDA</label>
+            <select class="cms-select" id="ed-mon" style="width:100%">
+              <option value="ARS" ${a.moneda==='ARS'?'selected':''}>ARS</option>
+              <option value="USD" ${a.moneda==='USD'?'selected':''}>USD</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">BASE</label>
+            <input class="cms-input" id="ed-bas" value="${a.base || ''}" placeholder="ej. 100" style="width:100%">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+          <div>
+            <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">FUENTE PRECIO</label>
+            <select class="cms-select" id="ed-fue" style="width:100%">${fOpts}</select>
+          </div>
+          <div>
+            <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">LÁMINA</label>
+            <input class="cms-input" id="ed-lam" value="${a.lamina ?? 1}" placeholder="1" style="width:100%">
+          </div>
+          <div>
+            <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">TNA %</label>
+            <input class="cms-input" id="ed-tas" value="${a.tasa ?? ''}" placeholder="—" style="width:100%">
+          </div>
+        </div>
+        <div>
+          <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">LIVE SYMBOL</label>
+          <input class="cms-input" id="ed-sym" value="${a.live_symbol || ticker}" style="width:100%;font-family:'JetBrains Mono',monospace;font-size:12px">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="closeModal()">Cancelar</button>
+        <button class="btn-primary" onclick="guardarEditarActivo('${fundId}','${ticker}')">💾 Guardar</button>
+      </div>
+    </div>`);
+}
+
+async function guardarEditarActivo(fundId, ticker) {
+  const tabla = ACTIVOS_TABLE[fundId];
+  const updates = {
+    nombre:        document.getElementById('ed-nom')?.value?.trim(),
+    tipo_activo:   document.getElementById('ed-tip')?.value,
+    categoria:     document.getElementById('ed-cat')?.value || null,
+    moneda:        document.getElementById('ed-mon')?.value,
+    fuente_precio: document.getElementById('ed-fue')?.value,
+    live_symbol:   document.getElementById('ed-sym')?.value?.trim(),
+    tasa:          parseFloat(document.getElementById('ed-tas')?.value) || null,
+    lamina:        parseFloat(document.getElementById('ed-lam')?.value) || 1,
+    base:          document.getElementById('ed-bas')?.value?.trim() || null,
+  };
+  try {
+    const r = await fetch(`${SB_URL}/${tabla}?ticker=eq.${encodeURIComponent(ticker)}`, {
+      method: 'PATCH',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify(updates),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    closeModal();
+    cargarActivosTabla(fundId);
+  } catch(e) {
+    alert('Error guardando: ' + e.message);
+  }
+}
 </script>
 </body>
 </html>
