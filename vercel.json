@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/snapshot-fx",
+      "schedule": "50 19 * * *"
+    }
+  ]
+}
