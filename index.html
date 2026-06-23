@@ -900,20 +900,20 @@ function renderFondo(fundId) {
   // ── Holdings rows ────────────────────────────────────────────────
   const rows = holdings.map(h => {
     const meta   = fondoMeta[h.ticker];
+    const instrMoneda = meta?.moneda || 'ARS';
     const { price, live } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje);
     const lamina  = meta?.lamina || 1;
     const cierre  = h.cierre * lamina;
     const varPct  = cierre > 0 ? price / cierre - 1 : 0;
     const monto   = h.cantidad * (price / lamina);
-    const moneda  = meta?.moneda || 'ARS';
     const tipo    = meta?.tipo   || 'Otros';
     const dot     = dotColor(tipo);
     const varColor = Math.abs(varPct) < 1e-9 ? '#9A9AA0' : (varPct > 0 ? '#2E9E2A' : '#D33A3F');
     const badge   = live
       ? `<span class="badge badge-live">LIVE</span>`
       : `<span class="badge badge-hold">CIERRE</span>`;
-    const monedaBg    = moneda === 'USD' ? '#ECFCCB' : '#EDE9FE';
-    const monedaColor = moneda === 'USD' ? '#3F6212' : '#5B21B6';
+    const monedaBg    = instrMoneda === 'USD' ? '#ECFCCB' : '#EDE9FE';
+    const monedaColor = instrMoneda === 'USD' ? '#3F6212' : '#5B21B6';
 
     return `
       <tr>
@@ -924,7 +924,7 @@ function renderFondo(fundId) {
         <td class="num">${f2(price)} ${badge}</td>
         <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
         <td class="num">${fARS(monto)}</td>
-        <td><span class="moneda-badge" style="background:${monedaBg};color:${monedaColor}">${moneda}</span></td>
+        <td><span class="moneda-badge" style="background:${monedaBg};color:${monedaColor}">${instrMoneda}</span></td>
       </tr>`;
   }).join('');
 
@@ -1129,24 +1129,18 @@ async function parsePDF(arrayBuffer) {
   const pdfjs = await loadPDFJS();
   const pdf   = await pdfjs.getDocument({ data: arrayBuffer }).promise;
 
-  // ── Paso 1: extraer todos los ítems con posición ──────────────────
+  // ── Extraer ítems con posición, agrupar en líneas por y ───────────
   const allItems = [];
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const vp   = page.getViewport({ scale: 1 });
     const tc   = await page.getTextContent();
     tc.items.forEach(it => {
-      allItems.push({
-        raw:  it.str,
-        text: it.str.trim(),
-        x:    Math.round(it.transform[4]),
-        y:    Math.round(vp.height - it.transform[5]),
-        pg:   p,
-      });
+      allItems.push({ text: it.str.trim(), x: Math.round(it.transform[4]),
+                      y: Math.round(vp.height - it.transform[5]), pg: p });
     });
   }
 
-  // ── Paso 2: agrupar ítems en "líneas" por y-coordinate ───────────
   const lineMap = new Map();
   for (const item of allItems) {
     if (!item.text) continue;
@@ -1158,176 +1152,163 @@ async function parsePDF(arrayBuffer) {
   }
   const lines = [...lineMap.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([y, items]) => {
-      const sorted = items.sort((a, b) => a.x - b.x);
-      return { y, text: sorted.map(i => i.text).filter(Boolean).join(' '), items: sorted };
-    });
+    .map(([y, items]) => ({
+      y,
+      text: items.sort((a, b) => a.x - b.x).map(i => i.text).filter(Boolean).join(' '),
+      items: items.sort((a, b) => a.x - b.x),
+    }));
 
-  console.log('[PDF] páginas:', pdf.numPages, '| líneas totales:', lines.length);
+  console.log('[PDF] páginas:', pdf.numPages, '| líneas:', lines.length);
 
   const res = { holdings: [], denomMap: {}, fecha: null, navCierre: null, cuotapartes: null, ajustes: [] };
-
-  // ── Fecha ──────────────────────────────────────────────────────────
+  const numPat = /\d{1,3}(?:\.\d{3})*,\d+/g;
   const fullText = lines.map(l => l.text).join('\n');
+
+  // Fecha
   const fechaM = fullText.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
   if (fechaM) res.fecha = fechaM[1];
 
-  // ── NAV y cuotapartes ─────────────────────────────────────────────
-  const numPat = /\d{1,3}(?:\.\d{3})*,\d+/g;
+  // NAV y cuotapartes (fila "A" en DETALLE)
   const detIdx = lines.findIndex(l => l.text.includes('DETALLE') && l.text.includes('GENERACION'));
   if (detIdx !== -1) {
     for (let i = detIdx + 1; i < Math.min(detIdx + 20, lines.length); i++) {
-      const l = lines[i];
-      if (/^A\b/.test(l.text)) {
-        const nums = [...l.text.matchAll(numPat)].map(m => parseArNum(m[0])).filter(n => n > 0);
+      if (/^A\b/.test(lines[i].text)) {
+        const nums = [...lines[i].text.matchAll(numPat)].map(m => parseArNum(m[0])).filter(n => n > 0);
         if (nums.length >= 3) { res.cuotapartes = nums[1]; res.navCierre = nums[2]; }
         break;
       }
     }
   }
 
-  // ── Ajustes contables ─────────────────────────────────────────────
-  const ajusteSpec = [
+  // Ajustes
+  const ajSpec = [
     { key: '(+) Disponibilidades',              pat: 'DISPONIBILIDADES',   sign:  1 },
     { key: '(+) Gastos diferidos (honorarios)', pat: 'GASTOS DIFERIDOS',    sign:  1 },
     { key: '(−) Provisiones',                   pat: 'PROVISIONES',         sign: -1 },
     { key: '(−) Acreedores por operaciones',    pat: 'ACREEDORES POR OPER', sign: -1 },
   ];
-  for (const { key, pat, sign } of ajusteSpec) {
+  for (const { key, pat, sign } of ajSpec) {
     const line = lines.find(l => l.text.toUpperCase().includes(pat));
     if (!line) continue;
     const nums = [...line.text.matchAll(numPat)];
     if (nums.length) res.ajustes.push({ label: key, val: parseArNum(nums[nums.length-1][0]) * sign });
   }
 
-  // ── Sección INVERSIONES ───────────────────────────────────────────
-  const invIdx = lines.findIndex(l => /\bINVERSIONES\b/.test(l.text));
-  console.log('[PDF] INVERSIONES en línea:', invIdx, invIdx >= 0 ? lines[invIdx].text : 'NO ENCONTRADA');
-
-  let totIdx = -1;
-  for (let i = invIdx + 1; i < lines.length; i++) {
-    if (lines[i].text.includes('Total Inversiones') ||
-        (lines[i].text.startsWith('Total') && lines[i].text.match(/\d{8,}/))) {
-      totIdx = i; break;
+  // ── Buscar la sección INVERSIONES que precede la tabla de datos ───
+  // Ignorar el "INVERSIONES" del balance sheet (no tiene Abreviatura/IsinCode cerca)
+  let invIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/\bInversiones\b/i.test(lines[i].text)) {
+      const ctx = lines.slice(i, i + 8).map(l => l.text).join(' ');
+      if (ctx.includes('Abreviatura') || ctx.includes('IsinCode') ||
+          (ctx.includes('Denominación') && (ctx.includes('Cantidad') || ctx.includes('Cotización')))) {
+        invIdx = i;
+        break;
+      }
     }
   }
-  console.log('[PDF] Total Inversiones en línea:', totIdx, totIdx >= 0 ? lines[totIdx].text.substring(0,60) : 'NO ENCONTRADA');
+  console.log('[PDF] Tabla INVERSIONES en línea:', invIdx,
+    invIdx >= 0 ? lines[invIdx].text.substring(0,60) : 'NO ENCONTRADA');
 
-  if (invIdx === -1 || totIdx === -1) {
-    console.warn('[PDF] No se encontró la sección INVERSIONES — primeras 20 líneas:',
-      lines.slice(0, 20).map(l => l.text.substring(0,60)));
+  if (invIdx === -1) {
+    console.warn('[PDF] Sección de inversiones no encontrada.');
     return res;
   }
 
-  // ── Posiciones x de las columnas (desde encabezados) ─────────────
-  let xAbrev = null, xISIN = null, xCotiz = null, xCant = null, xTot = null;
-  for (let i = invIdx; i < Math.min(invIdx + 6, totIdx); i++) {
-    const l = lines[i];
-    if (!xAbrev && l.text.includes('Abreviatura'))
-      xAbrev = l.items.find(it => it.text.includes('Abreviatura'))?.x;
-    if (!xISIN && l.text.includes('ISIN'))
-      xISIN = l.items.find(it => it.text.includes('ISIN'))?.x;
-    if (!xCotiz && (l.text.includes('Cotización') || l.text.includes('Cotizaci')))
-      xCotiz = l.items.find(it => it.text.includes('Cotizaci'))?.x;
-    if (!xCant && l.text.includes('Cantidad'))
-      xCant = l.items.find(it => it.text === 'Cantidad')?.x;
-    if (!xTot) {
-      const t = l.items.find(it => it.text === 'Total' && it.x > 400);
-      if (t) xTot = t.x;
+  // Detectar formato: REIT/PNIZF tiene "Abreviatura", Ciclo Nova tiene "IsinCode"
+  const hdrCtx = lines.slice(invIdx, invIdx + 6).map(l => l.text).join(' ');
+  const isCicloNova = hdrCtx.includes('IsinCode') && !hdrCtx.includes('Abreviatura');
+  console.log('[PDF] Formato:', isCicloNova ? 'CICLO_NOVA' : 'REIT/PNIZF');
+
+  // Fin de sección
+  let totIdx = lines.length - 1;
+  for (let i = invIdx + 2; i < lines.length; i++) {
+    const t = lines[i].text.trim();
+    if (t.startsWith('Total Inversiones') ||
+        (t.startsWith('Total') && /\d{9,}/.test(t.replace(/\./g, '').replace(/,/g, ''))) ||
+        t.startsWith('(1) Sobre') || t.startsWith('MONEDAS') ||
+        t.includes('Todos los importes')) {
+      totIdx = i; break;
     }
   }
-  console.log('[PDF] Columnas x:', { xAbrev, xISIN, xCotiz, xCant, xTot });
 
-  // Fallbacks si no se encontraron los encabezados
-  xAbrev = xAbrev ?? 168;
-  xISIN  = xISIN  ?? 258;
-  xCotiz = xCotiz ?? 338;
-  xCant  = xCant  ?? 420;
-  xTot   = xTot   ?? 508;
-
-  // ── Filas de datos ────────────────────────────────────────────────
-  // Línea de encabezado de columnas: la que tiene "Abreviatura"
-  const headerLineIdx = lines.slice(invIdx, invIdx + 6).findIndex(l => l.text.includes('Abreviatura'));
-  const skipY = headerLineIdx >= 0 ? lines[invIdx + headerLineIdx].y : null;
-
+  // Filas de datos: entre invIdx+1 y totIdx, con al menos 2 números
   const dataLines = lines.slice(invIdx + 1, totIdx).filter(l => {
-    if (skipY && Math.abs(l.y - skipY) < 4) return false;
-    return ([...l.text.matchAll(numPat)] || []).length >= 2;
+    const t = l.text.trim();
+    if (/^(PRIVADA|PUBLICA|PUBLICA|Inversiones)\b/i.test(t)) return false; // subsection headers
+    if (t.includes('Denominación') || t.includes('Abreviatura') || t.includes('IsinCode')) return false;
+    return ([...t.matchAll(numPat)] || []).length >= 2;
   });
 
   console.log('[PDF] Filas de datos:', dataLines.length);
 
   const usedTickers = new Set();
+
   for (const line of dataLines) {
-    // ── Intento 1: extracción por columnas x ─────────────────────
-    const inRange = (x1, x2) => line.items
-      .filter(i => i.x >= x1 - 14 && i.x < x2 + 14)
-      .map(i => i.text).filter(Boolean).join(' ').trim();
+    const t = line.text.trim();
+    const nums = [...t.matchAll(numPat)].map(m => m[0]);
+    let ticker = '', cierre = 0, cantidad = 0;
 
-    const denomStr = inRange(0,      xAbrev);
-    let   ticker   = inRange(xAbrev, xISIN).replace(/^#/, '').trim();
-    const cotizStr = inRange(xCotiz, xCant);
-    const cantStr  = inRange(xCant,  xTot);
-
-    let cierre = 0, cantidad = 0;
-
-    if (ticker && cotizStr && cantStr) {
-      cierre   = parseArNum(cotizStr);
-      cantidad = parseArNum(cantStr);
-    }
-
-    // ── Intento 2 (fallback): regex sobre texto completo de la línea
-    if (!ticker || cierre <= 0 || cantidad <= 0) {
-      const nums = [...line.text.matchAll(numPat)].map(m => m[0]);
-      if (nums.length < 3) {
-        console.log('[PDF] Skip (< 3 nums):', line.text.substring(0,80));
-        continue;
+    if (isCicloNova) {
+      // ── Formato Ciclo Nova ────────────────────────────────────────
+      // Ticker = primera palabra antes de " - "
+      const dashIdx = t.indexOf(' - ');
+      const firstPart = dashIdx > 0 ? t.substring(0, dashIdx) : t.split(' ')[0];
+      ticker = firstPart.trim().split(/\s+/)[0].replace(/^#/, '');
+      // Saltar filas de subtotales de sección (primer carácter es dígito)
+      if (/^\d/.test(ticker) || /[,\.]/.test(ticker)) continue;
+      // Cantidad = primer número, Cierre = segundo número
+      if (nums.length >= 2) {
+        cantidad = parseArNum(nums[0]);
+        cierre   = parseArNum(nums[1]);
       }
-      const cotN = nums[nums.length - 3];
-      const canN = nums[nums.length - 2];
-      cierre   = parseArNum(cotN);
-      cantidad = parseArNum(canN);
+    } else {
+      // ── Formato REIT / PNIZF ─────────────────────────────────────
+      // Últimos 3 números: Cotización | Cantidad | Total
+      if (nums.length < 3) continue;
+      cierre   = parseArNum(nums[nums.length - 3]);
+      cantidad = parseArNum(nums[nums.length - 2]);
 
-      // Remover los 3 números del final para aislar la parte de texto
-      let textPart = line.text;
-      [nums[nums.length-1], nums[nums.length-2], nums[nums.length-3]].forEach(n => {
-        textPart = textPart.replace(n, ' ');
-      });
-      const words = textPart.trim().split(/\s+/).filter(w => w && w !== '-' && w !== '(');
+      // Ticker: última "palabra" antes de los números y el ISIN
+      let textPart = t;
+      [nums[nums.length-1], nums[nums.length-2], nums[nums.length-3]]
+        .forEach(n => { textPart = textPart.replace(n, ' '); });
+
+      const words = textPart.trim().split(/\s+/)
+        .filter(w => w && w !== '-' && w !== '(' && w !== ')');
       if (!words.length) continue;
 
       const lastW = words[words.length - 1];
-      const isISIN = /^[A-Z]{2}[A-Z0-9]{10}$/.test(lastW);
-      // "MM" es sufijo de tipo, no ticker
-      const isTypeCode = ['MM', 'BOND', 'FCI'].includes(lastW);
+      const prevW = words.length >= 2 ? words[words.length - 2] : '';
+      const isISIN     = /^[A-Z]{2}[A-Z0-9]{10}$/.test(lastW);
+      const isTypeCode = ['MM', 'FCI', 'BOND'].includes(lastW);
 
-      if (isISIN || isTypeCode) {
-        ticker = words[words.length - 2]?.replace(/^#/, '') || '';
-      } else {
-        ticker = lastW?.replace(/^#/, '') || '';
-      }
+      ticker = (isISIN || isTypeCode) ? prevW.replace(/^#/, '') : lastW.replace(/^#/, '');
     }
 
-    if (!ticker || cierre <= 0 || cantidad <= 0) continue;
+    if (!ticker || cierre <= 0 || cantidad <= 0) {
+      console.log('[PDF] Fila ignorada:', t.substring(0, 80));
+      continue;
+    }
 
-    // Deduplicar (ej. tres UMV2001700)
+    // Deduplicar (ej. tres tramos UMV)
     if (usedTickers.has(ticker)) {
-      const fw = (denomStr || line.text).split(/\s+/)[0]?.replace(/^#/, '') || '';
+      const fw = t.split(/\s+/)[0]?.replace(/^#/, '') || '';
       if (fw && fw !== ticker && !usedTickers.has(fw)) {
         ticker = fw;
       } else {
-        const cm = (denomStr || line.text).match(/\((\d{5,})\)/);
+        const cm = t.match(/\((\d{5,})\)/);
         ticker = cm ? ticker + '_' + cm[1] : ticker + '_' + (usedTickers.size + 1);
       }
     }
 
     usedTickers.add(ticker);
-    res.denomMap[ticker] = (denomStr || line.text).split(/[(\-]/)[0].trim().substring(0, 60);
+    res.denomMap[ticker] = t.split(/[(\-]/)[0].trim().substring(0, 60);
     res.holdings.push({ ticker, cierre, cantidad });
-    console.log('[PDF] Holding:', ticker, cierre, cantidad);
+    console.log('[PDF] Holding:', ticker, '| cierre:', cierre, '| cant:', cantidad);
   }
 
-  console.log('[PDF] Total holdings:', res.holdings.length);
+  console.log('[PDF] Total:', res.holdings.length, 'instrumentos');
   return res;
 }
 
