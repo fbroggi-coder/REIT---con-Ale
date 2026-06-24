@@ -509,6 +509,7 @@ function nextBizDays() {
 //
 function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canje) {
   const kind   = meta?.kind   || 'hold';
+  const tipo   = meta?.tipo   || '';
   const tasa   = meta?.tasa   ?? null;
   const lamina = meta?.lamina || 1;
   const sym    = meta?.liveSymbol || h.ticker;
@@ -517,7 +518,7 @@ function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canj
   const n      = nextBizDays();
   const base   = h.cierre * lamina;
 
-  // ── MERCADO LOCAL (bonos AR, letras, acciones AR) ────────────────
+  // ── MERCADO LOCAL (bonos AR, letras, CEDEARs, acciones AR, opciones) ─
   if (kind === 'market') {
     const raw  = marketMap?.[sym];
     let liveP  = null;
@@ -530,65 +531,73 @@ function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canj
     }
     const priceARS = liveP ?? base;
     const live     = liveP != null;
-    if (fondoMoneda === 'USD')
+    if (fondoMoneda === 'USD') {
+      // HD: data912 devuelve precio directo en USD (hard dollar)
+      if (tipo.includes('HD'))
+        return { price: priceARS, live };
+      // DL / ARS: precio en ARS → convertir a USD vía MEP
       return { price: fxNow > 0 ? priceARS / fxNow : h.cierre, live: live && fxNow > 0 };
+    }
     return { price: priceARS, live };
   }
 
-  // ── ACCIONES / ADRs USA ──────────────────────────────────────────
+  // ── ACCIONES / ADRs USA (precio en USD cable) ────────────────────
   if (kind === 'usMarket') {
     const raw = usMap?.[sym];
-    if (raw && raw.c > 0 && raw.v > 0 && canje > 0) {
+    if (raw && raw.c > 0 && raw.v > 0) {
       const priceUSD = raw.c;
-      if (fondoMoneda === 'USD') return { price: priceUSD, live: true };
-      // Para fondo ARS: convertir USD cable → ARS vía CCL
+      if (fondoMoneda === 'USD')
+        // Precio USD cable → USD MEP dividiendo por canje (CCL/MEP)
+        return { price: canje > 0 ? priceUSD / canje : priceUSD, live: canje > 0 };
+      // Fondo ARS: USD cable → ARS vía CCL
       return { price: priceUSD * fxNow * canje, live: fxNow > 0 };
     }
     return { price: base, live: false };
   }
 
-  // ── MONEY MARKET USD ─────────────────────────────────────────────
+  // ── MONEY MARKET USD / Pagaré USD (devenga en USD) ───────────────
   if (kind === 'mmUsd') {
-    if (fondoMoneda === 'USD')
-      // En fondo USD el instrumento ya cotiza en USD; no cambia de denominación
-      return { price: base, live: false };
-    // En fondo ARS: ajustar por variación de MEP
-    if (fxB > 0)
-      return { price: base * (fxNow / fxB), live: fxNow > 0 };
-    return { price: base, live: false };
-  }
-
-  // ── DEVENGAMIENTO USD (Pagaré HD) ────────────────────────────────
-  if (kind === 'devengo') {
     if (tasa == null) return { price: base, live: false };
     const devengado = base * (1 + tasa / 100 / 365 * n);
     if (fondoMoneda === 'USD')
       return { price: devengado, live: true };
-    // Fondo ARS: multiplicar por variación MEP
+    // Fondo ARS: ajustar por variación de MEP
     if (fxB > 0)
       return { price: devengado * (fxNow / fxB), live: fxNow > 0 };
     return { price: devengado, live: true };
   }
 
-  // ── MONEY MARKET ARS (cuotaparte que devenga en ARS, sin ajuste MEP) ──
+  // ── DEVENGAMIENTO USD (legacy) ────────────────────────────────────
+  if (kind === 'devengo') {
+    if (tasa == null) return { price: base, live: false };
+    const devengado = base * (1 + tasa / 100 / 365 * n);
+    if (fondoMoneda === 'USD')
+      return { price: devengado, live: true };
+    if (fxB > 0)
+      return { price: devengado * (fxNow / fxB), live: fxNow > 0 };
+    return { price: devengado, live: true };
+  }
+
+  // ── MONEY MARKET ARS / Pagaré ARS (devenga en ARS) ──────────────
   if (kind === 'mmArs') {
     if (tasa == null) return { price: base, live: false };
     const devengado = base * (1 + tasa / 100 / 365 * n);
     if (fondoMoneda === 'ARS')
       return { price: devengado, live: true };
-    // Fondo USD: convertir ARS → USD vía MEP
+    // Fondo USD: base en USD → devengado * MEP_ayer / MEP_hoy
+    if (fxNow > 0 && fxB > 0)
+      return { price: devengado * fxB / fxNow, live: true };
     if (fxNow > 0)
       return { price: devengado / fxNow, live: true };
     return { price: base, live: false };
   }
 
-  // ── DEVENGAMIENTO ARS (Pagaré ARS) ──────────────────────────────
+  // ── DEVENGAMIENTO ARS puro ───────────────────────────────────────
   if (kind === 'devengoARS') {
     if (tasa == null) return { price: base, live: false };
     const devengado = base * (1 + tasa / 100 / 365 * n);
     if (fondoMoneda === 'ARS')
       return { price: devengado, live: true };
-    // Fondo USD: convertir ARS → USD vía MEP
     if (fxNow > 0)
       return { price: devengado / fxNow, live: true };
     return { price: base, live: false };
@@ -808,6 +817,7 @@ const state = {
   usMap:     {},
   fxLive:    0,
   fxAyer:    0,
+  fxAyerCCL: 0,
   canje:     1,
   loading:   true,
   error:     null,
@@ -1116,8 +1126,9 @@ async function init() {
     FUNDS_CONFIG   = fundsConfig;
     state.meta     = meta;
     state.holdings = holdings;
-    state.fxAyer   = fxAyer.mep;
-    state.loading  = false;
+    state.fxAyer    = fxAyer.mep;
+    state.fxAyerCCL = fxAyer.ccl;
+    state.loading   = false;
     render();
 
     const live = await fetchLivePrecios();
