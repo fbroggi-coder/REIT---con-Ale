@@ -628,6 +628,8 @@ function calcNAV(fundId) {
 
   for (const h of holdings) {
     const m = meta[h.ticker];
+    // Los futuros de dólar no suman al PN
+    if (m?.tipo === 'Futuro de Dólar') continue;
     const { price } = calcPrecio(h, m, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje);
     const lamina = m?.lamina || 1;
     totalInv += h.cantidad * (price / lamina);
@@ -639,7 +641,10 @@ function calcNAV(fundId) {
   // PNIZF ya incluye honorarios en los ajustes del PDF → no restar el calculado
   const honorario = fundId === 'PNIZF' ? 0 : pnBruto * (cfg.feeAnual || 0) / 365;
   const pn        = pnBruto - honorario;
-  const navLive   = cfg.cuotapartes > 0 ? pn / cfg.cuotapartes : 0;
+  // CICLO_NOVA: cuotapartes del PDF están expresadas en milésimas → × 1000
+  const navLive   = cfg.cuotapartes > 0
+    ? (pn / cfg.cuotapartes) * (fundId === 'CICLO_NOVA' ? 1000 : 1)
+    : 0;
   const rend      = cfg.navCierre   > 0 ? navLive / cfg.navCierre - 1 : 0;
 
   return { totalInv, ajusteSum, pnBruto, honorario, pn, navLive, rend };
@@ -1629,12 +1634,13 @@ function showActivosCMS(fundId, nuevos, denomMap) {
 
   const TIPO_LISTA = [
     'Commodities','Compra Call','Covered Call','Equity Argentina','Equity USA',
+    'Futuro de Dólar',
     'Money Market ARS','Money Market USD','ON DL','ON HD',
     'Pagare ARS','Pagare USD','Short Equity','Short Renta Fija',
     'Soberano DL','Soberano HD','Soberanos ARS','Venta Call',
   ];
   const CATEGORIA_LISTA = [
-    'Commodities','Compra Call','Covered Call','Equity','Liquidez',
+    'Commodities','Compra Call','Covered Call','Equity','Futuro de Dólar','Liquidez',
     'Renta Fija','Short Equity','Short Renta Fija','Venta Call',
   ];
   const FUENTE_LISTA = Object.keys(FUENTE_KIND);
