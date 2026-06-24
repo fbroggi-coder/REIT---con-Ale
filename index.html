@@ -726,6 +726,23 @@ async function cargarFxAyer() {
   }
 }
 
+async function actualizarPrecios() {
+  if (state.updatingPrices) return;
+  state.updatingPrices = true;
+  render();
+  try {
+    const live = await fetchLivePrecios();
+    state.fxLive          = live.fxLive;
+    state.canje           = live.canje;
+    state.marketMap       = live.marketMap;
+    state.usMap           = live.usMap;
+    state.lastPriceUpdate = new Date();
+  } finally {
+    state.updatingPrices = false;
+    render();
+  }
+}
+
 async function fetchLivePrecios() {
   try {
     const [bonds, corp, notes, mepArr, cclArr] = await Promise.all([
@@ -788,6 +805,8 @@ const state = {
   canje:     1,
   loading:   true,
   error:     null,
+  lastPriceUpdate: null,  // Date de la última actualización de precios
+  updatingPrices:  false, // true mientras se está actualizando
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -994,10 +1013,15 @@ function renderFondo(fundId) {
         </div>
       </div>
 
-      <div style="display:flex;justify-content:flex-end;gap:10px;margin-bottom:14px">
+      <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-bottom:14px">
         <button data-action="activos" data-id="${fundId}" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="15" x2="12" y2="15"/></svg>
           Activos
+        </button>
+        <button onclick="actualizarPrecios()" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);${state.updatingPrices ? 'opacity:0.5;cursor:not-allowed' : ''}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="${state.updatingPrices ? 'animation:spin 1s linear infinite' : ''}"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          ${state.updatingPrices ? 'Actualizando…' : 'Actualizar precios'}
+          ${state.lastPriceUpdate ? `<span style="font-size:10px;opacity:0.5;margin-left:4px">${state.lastPriceUpdate.toLocaleTimeString('es-AR', {hour:'2-digit',minute:'2-digit'})}</span>` : ''}
         </button>
         <label for="pdf-input" class="upload-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
@@ -1090,18 +1114,20 @@ async function init() {
     render();
 
     const live = await fetchLivePrecios();
-    state.fxLive    = live.fxLive;
-    state.canje     = live.canje;
-    state.marketMap = live.marketMap;
-    state.usMap     = live.usMap;
+    state.fxLive          = live.fxLive;
+    state.canje           = live.canje;
+    state.marketMap       = live.marketMap;
+    state.usMap           = live.usMap;
+    state.lastPriceUpdate = new Date();
     render();
 
     setInterval(async () => {
       const live = await fetchLivePrecios();
-      state.fxLive    = live.fxLive;
-      state.canje     = live.canje;
-      state.marketMap = live.marketMap;
-      state.usMap     = live.usMap;
+      state.fxLive          = live.fxLive;
+      state.canje           = live.canje;
+      state.marketMap       = live.marketMap;
+      state.usMap           = live.usMap;
+      state.lastPriceUpdate = new Date();
       render();
     }, 60_000);
 
