@@ -837,6 +837,7 @@ const state = {
   error:     null,
   lastPriceUpdate: null,  // Date de la última actualización de precios
   updatingPrices:  false, // true mientras se está actualizando
+  breakdown:       null,  // null | 'moneda' | 'tipo' | 'cat'
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -957,6 +958,87 @@ function renderLanding() {
     <div class="fund-cards">${cards}</div>`;
 }
 
+// ── BREAKDOWN ────────────────────────────────────────────────────────
+function toggleBreakdown(mode) {
+  state.breakdown = state.breakdown === mode ? null : mode;
+  render();
+}
+
+function renderBreakdownPanel(fundId) {
+  const mode = state.breakdown;
+  if (!mode) return '';
+
+  const cfg       = FUNDS_CONFIG[fundId];
+  const holdings  = state.holdings[fundId] || [];
+  const fondoMeta = state.meta[fundId]    || {};
+  const moneda    = cfg.moneda || 'ARS';
+  const { pn }    = calcNAV(fundId);
+  if (pn <= 0) return '';
+
+  // Calcular monto por holding
+  const items = holdings.map(h => {
+    const meta   = fondoMeta[h.ticker];
+    const { price } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje);
+    const lamina = meta?.lamina || 1;
+    return {
+      tipo:        meta?.tipo      || 'Otros',
+      cat:         meta?.categoria || 'Sin categoría',
+      monedaInstr: meta?.moneda    || 'ARS',
+      monto:       h.cantidad * (price / lamina),
+    };
+  });
+
+  const groups = {};
+
+  if (mode === 'moneda') {
+    for (const it of items) {
+      if (it.tipo === 'Futuro de Dólar') {
+        // Futuros restan al bucket ARS
+        groups['ARS'] = (groups['ARS'] || 0) - it.monto;
+      } else {
+        groups[it.monedaInstr] = (groups[it.monedaInstr] || 0) + it.monto;
+      }
+    }
+  } else if (mode === 'tipo') {
+    for (const it of items) {
+      if (it.tipo === 'Futuro de Dólar') continue;
+      groups[it.tipo] = (groups[it.tipo] || 0) + it.monto;
+    }
+  } else {
+    for (const it of items) {
+      if (it.tipo === 'Futuro de Dólar') continue;
+      groups[it.cat] = (groups[it.cat] || 0) + it.monto;
+    }
+  }
+
+  const sorted  = Object.entries(groups).sort((a, b) => b[1] - a[1]);
+  const maxAbs  = Math.max(...sorted.map(([, v]) => Math.abs(v)), 1);
+  const COLORS  = ['#A6E635','#7C3AED','#2DD4BF','#F59E0B','#60A5FA','#F472B6','#34D399','#FB923C','#A78BFA','#94A3B8'];
+
+  const rows = sorted.map(([label, val], i) => {
+    const pct      = val / pn * 100;
+    const barW     = Math.abs(val) / maxAbs * 100;
+    const isNeg    = val < 0;
+    const barColor = isNeg ? '#D33A3F' : COLORS[i % COLORS.length];
+    return `
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+        <div style="width:140px;font-size:12px;color:#C0C0C8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0">${label}</div>
+        <div style="flex:1;background:#1E1E26;border-radius:4px;height:10px;overflow:hidden">
+          <div style="width:${barW}%;height:100%;background:${barColor};border-radius:4px;transition:width 0.3s"></div>
+        </div>
+        <div style="width:52px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:${isNeg ? '#D33A3F' : '#E5E5E7'}">${pct.toFixed(1)}%</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div style="background:#161618;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px;margin-bottom:16px">
+      <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:14px">
+        ${{ moneda: 'Composición por Moneda', tipo: 'Composición por Tipo de Activo', cat: 'Composición por Categoría' }[mode]}
+      </div>
+      ${rows}
+    </div>`;
+}
+
 // ── FONDO DETALLE ────────────────────────────────────────────────────
 function renderFondo(fundId) {
   const cfg = FUNDS_CONFIG[fundId];
@@ -1049,7 +1131,21 @@ function renderFondo(fundId) {
         </div>
       </div>
 
-      <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+        <!-- Breakdown buttons -->
+        <div style="display:flex;gap:6px">
+          ${['moneda','tipo','cat'].map((m, i) => {
+            const label = ['Moneda','Tipo de Activo','Categoría'][i];
+            const active = state.breakdown === m;
+            return `<button onclick="toggleBreakdown('${m}')"
+              style="padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;transition:all 0.15s;
+                     background:${active ? 'rgba(166,230,53,0.15)' : 'rgba(255,255,255,0.05)'};
+                     border:1px solid ${active ? 'rgba(166,230,53,0.4)' : 'rgba(255,255,255,0.08)'};
+                     color:${active ? '#A6E635' : '#9A9AA0'}">${label}</button>`;
+          }).join('')}
+        </div>
+        <!-- Right side buttons -->
+        <div style="display:flex;gap:10px;align-items:center">
         <button data-action="activos" data-id="${fundId}" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="15" x2="12" y2="15"/></svg>
           Activos
@@ -1063,7 +1159,10 @@ function renderFondo(fundId) {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
           Cargar PDF
         </label>
-      </div>
+        </div><!-- end right buttons -->
+      </div><!-- end toolbar -->
+
+      ${renderBreakdownPanel(fundId)}
 
       <!-- Filter bar -->
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">
@@ -1143,8 +1242,9 @@ function bindEvents() {
     el.addEventListener('click', () => {
       const action = el.dataset.action;
       if (action === 'fondo') {
-        state.view   = 'fund';
-        state.fundId = el.dataset.id;
+        state.view      = 'fund';
+        state.fundId    = el.dataset.id;
+        state.breakdown = null;
         render();
       } else if (action === 'landing') {
         state.view = 'landing';
