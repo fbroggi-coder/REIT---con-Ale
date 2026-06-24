@@ -523,11 +523,17 @@ function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canj
     const raw  = marketMap?.[sym];
     let liveP  = null;
     if (raw && raw.c > 0) {
-      const cands = [raw.c, raw.c / 100, raw.c * 100];
-      const best  = cands.reduce((a, b) =>
-        Math.abs(Math.log(b / base)) < Math.abs(Math.log(a / base)) ? b : a
-      );
-      if (base > 0 && Math.abs(best / base - 1) <= 0.40) liveP = best;
+      if (base > 0) {
+        const cands = [raw.c, raw.c / 100, raw.c * 100];
+        const best  = cands.reduce((a, b) =>
+          Math.abs(Math.log(b / base)) < Math.abs(Math.log(a / base)) ? b : a
+        );
+        // Si el mejor candidato está dentro del 40%, usarlo; si no, confiar en data912 directamente
+        liveP = Math.abs(best / base - 1) <= 0.40 ? best : raw.c;
+      } else {
+        // Sin precio base → usar data912 directo
+        liveP = raw.c;
+      }
     }
     const priceARS = liveP ?? base;
     const live     = liveP != null;
