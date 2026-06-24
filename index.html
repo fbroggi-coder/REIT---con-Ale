@@ -691,7 +691,7 @@ async function cargarMeta() {
   await Promise.all(
     Object.entries(ACTIVOS_TABLE).map(async ([fundId, tabla]) => {
       try {
-        const rows = await sbGet(`/${tabla}?select=ticker,nombre,tipo_activo,categoria,moneda,fuente_precio,live_symbol,tasa,lamina`);
+        const rows = await sbGet(`/${tabla}?select=ticker,nombre,tipo_activo,categoria,moneda,fuente_precio,live_symbol,tasa,lamina,base`);
         const fondoMeta = {};
         for (const r of rows) {
           const fuente = r.fuente_precio || 'hold';
@@ -707,6 +707,7 @@ async function cargarMeta() {
             tasa:       r.tasa   != null ? parseFloat(r.tasa)   : null,
             lamina:     r.lamina != null ? parseFloat(r.lamina)
                                         : (fuente.startsWith('data912') ? 100 : 1),
+            base:       r.base   != null ? parseFloat(r.base)   : 0,
           };
           fondoMeta[r.ticker] = entry;
           if (r.live_symbol && r.live_symbol !== r.ticker) fondoMeta[r.live_symbol] = entry;
@@ -958,6 +959,43 @@ function renderLanding() {
     <div class="fund-cards">${cards}</div>`;
 }
 
+// ── MONTOS AJUSTADOS POR NOCIONAL DE OPCIONES (solo CICLO_NOVA) ──────
+// Para Compra/Venta/Covered Call: montoDisplay = monto + cantidad × base
+// El exceso nocional se descuenta en partes iguales de los MM USD.
+const OPTION_TIPOS = ['Compra Call', 'Venta Call', 'Covered Call'];
+
+function calcMontosCartera(fundId) {
+  const cfg       = FUNDS_CONFIG[fundId];
+  const holdings  = state.holdings[fundId] || [];
+  const fondoMeta = state.meta[fundId]    || {};
+  const moneda    = cfg?.moneda || 'ARS';
+  const applyAdj  = fundId === 'CICLO_NOVA';
+
+  const items = holdings.map(h => {
+    const meta   = fondoMeta[h.ticker];
+    const { price } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje);
+    const lamina  = meta?.lamina || 1;
+    const monto   = h.cantidad * (price / lamina);
+    const tipo    = meta?.tipo || 'Otros';
+    const isOpt   = applyAdj && OPTION_TIPOS.includes(tipo);
+    const notional = isOpt ? h.cantidad * (meta?.base || 0) : 0;
+    return { ticker: h.ticker, meta, tipo, monto, notional, isOpt };
+  });
+
+  if (!applyAdj) return items.map(i => ({ ...i, montoDisplay: i.monto }));
+
+  const totalNotional = items.reduce((s, i) => s + i.notional, 0);
+  const mmUsdItems    = items.filter(i => i.tipo === 'Money Market USD');
+  const mmUsdAdj      = mmUsdItems.length > 0 ? totalNotional / mmUsdItems.length : 0;
+
+  return items.map(i => {
+    let montoDisplay = i.monto;
+    if (i.isOpt)                       montoDisplay = i.monto + i.notional;
+    else if (i.tipo === 'Money Market USD') montoDisplay = i.monto - mmUsdAdj;
+    return { ...i, montoDisplay };
+  });
+}
+
 // ── BREAKDOWN ────────────────────────────────────────────────────────
 function toggleBreakdown(mode) {
   state.breakdown = state.breakdown === mode ? null : mode;
@@ -968,25 +1006,16 @@ function renderBreakdownPanel(fundId) {
   const mode = state.breakdown;
   if (!mode) return '';
 
-  const cfg       = FUNDS_CONFIG[fundId];
-  const holdings  = state.holdings[fundId] || [];
-  const fondoMeta = state.meta[fundId]    || {};
-  const moneda    = cfg.moneda || 'ARS';
-  const { pn }    = calcNAV(fundId);
+  const { pn } = calcNAV(fundId);
   if (pn <= 0) return '';
 
-  // Calcular monto por holding
-  const items = holdings.map(h => {
-    const meta   = fondoMeta[h.ticker];
-    const { price } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje);
-    const lamina = meta?.lamina || 1;
-    return {
-      tipo:        meta?.tipo      || 'Otros',
-      cat:         meta?.categoria || 'Sin categoría',
-      monedaInstr: meta?.moneda    || 'ARS',
-      monto:       h.cantidad * (price / lamina),
-    };
-  });
+  const rawItems = calcMontosCartera(fundId);
+  const items = rawItems.map(i => ({
+    tipo:        i.meta?.tipo      || 'Otros',
+    cat:         i.meta?.categoria || 'Sin categoría',
+    monedaInstr: i.meta?.moneda    || 'ARS',
+    monto:       i.montoDisplay,
+  }));
 
   const groups = {};
 
@@ -1051,8 +1080,10 @@ function renderFondo(fundId) {
   const rendColor = pos ? '#A6E635' : (neg ? '#D33A3F' : '#9A9AA0');
 
   // ── Holdings rows ────────────────────────────────────────────────
-  const tiposUnicos = [...new Set(holdings.map(h => fondoMeta[h.ticker]?.tipo).filter(Boolean))].sort();
-  const catsUnicas  = [...new Set(holdings.map(h => fondoMeta[h.ticker]?.categoria).filter(Boolean))].sort();
+  const tiposUnicos  = [...new Set(holdings.map(h => fondoMeta[h.ticker]?.tipo).filter(Boolean))].sort();
+  const catsUnicas   = [...new Set(holdings.map(h => fondoMeta[h.ticker]?.categoria).filter(Boolean))].sort();
+  const montosAjust  = calcMontosCartera(fundId); // mapa ticker → montoDisplay
+  const montosMap    = Object.fromEntries(montosAjust.map(i => [i.ticker, i.montoDisplay]));
 
   const rows = holdings.map(h => {
     const meta   = fondoMeta[h.ticker];
@@ -1064,6 +1095,7 @@ function renderFondo(fundId) {
     const monto   = h.cantidad * (price / lamina);
     const tipo    = meta?.tipo   || 'Otros';
     const cat     = meta?.categoria || '';
+    const montoDisplay = montosMap[h.ticker] ?? monto;
     const dot     = dotColor(tipo);
     const varColor = Math.abs(varPct) < 1e-9 ? '#9A9AA0' : (varPct > 0 ? '#2E9E2A' : '#D33A3F');
     const badge   = live
@@ -1081,7 +1113,7 @@ function renderFondo(fundId) {
         <td class="num">${f2(price)} ${badge}</td>
         <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
         <td class="num">${fARS(monto)}</td>
-        <td class="num" style="color:#9A9AA0">${pn > 0 ? (monto / pn * 100).toFixed(2) + '%' : '—'}</td>
+        <td class="num" style="color:#9A9AA0">${pn > 0 ? (montoDisplay / pn * 100).toFixed(2) + '%' : '—'}</td>
         <td><span class="moneda-badge" style="background:${monedaBg};color:${monedaColor}">${instrMoneda}</span></td>
       </tr>`;
   }).join('');
