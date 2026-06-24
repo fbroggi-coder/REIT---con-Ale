@@ -465,6 +465,7 @@ const FUENTE_KIND = {
   'data912_us_stocks':     'usMarket',
   'calculo MM usd':        'mmUsd',
   'calculo devengamiento': 'devengo',
+  'calculo MM ars':        'mmArs',
   'devengamiento ARS':     'devengoARS',
   'globo':                 'hold',
   'hold':                  'hold',
@@ -564,6 +565,18 @@ function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canj
     if (fxB > 0)
       return { price: devengado * (fxNow / fxB), live: fxNow > 0 };
     return { price: devengado, live: true };
+  }
+
+  // ── MONEY MARKET ARS (cuotaparte que devenga en ARS, sin ajuste MEP) ──
+  if (kind === 'mmArs') {
+    if (tasa == null) return { price: base, live: false };
+    const devengado = base * (1 + tasa / 100 / 365 * n);
+    if (fondoMoneda === 'ARS')
+      return { price: devengado, live: true };
+    // Fondo USD: convertir ARS → USD vía MEP
+    if (fxNow > 0)
+      return { price: devengado / fxNow, live: true };
+    return { price: base, live: false };
   }
 
   // ── DEVENGAMIENTO ARS (Pagaré ARS) ──────────────────────────────
