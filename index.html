@@ -637,7 +637,7 @@ async function sbGet(path) {
 
 // Carga la tabla `funds` de Supabase y construye FUNDS_CONFIG
 async function cargarFunds() {
-  const rows = await sbGet('/funds?select=id,nombre,moneda,color,cuotapartes,nav_cierre,pn_cierre,fee_anual,pdf_date');
+  const rows = await sbGet('/funds?select=id,nombre,moneda,color,cuotapartes,nav_cierre,pn_cierre,fee_anual,pdf_date,ajustes');
   const config = {};
   for (const r of rows) {
     config[r.id] = {
@@ -651,6 +651,10 @@ async function cargarFunds() {
       feeAnual:    parseFloat(r.fee_anual)   || 0.0168,
       pdfDate:     r.pdf_date || '',
     };
+    // Cargar ajustes persistidos desde Supabase (sobreescribe los hardcodeados)
+    if (Array.isArray(r.ajustes) && r.ajustes.length > 0) {
+      AJUSTES[r.id] = r.ajustes;
+    }
   }
   return config;
 }
@@ -1418,11 +1422,12 @@ async function confirmarCargaPDF() {
     });
     if (!ins.ok) throw new Error('Error insertando holdings: ' + ins.status);
 
-    // 3. Actualizar funds
+    // 3. Actualizar funds (nav, cuotapartes, fecha, ajustes)
     const patch = {};
-    if (data.navCierre)   patch.nav_cierre  = data.navCierre;
-    if (data.cuotapartes) patch.cuotapartes = data.cuotapartes;
-    if (data.fecha)       patch.pdf_date    = data.fecha;
+    if (data.navCierre)                          patch.nav_cierre  = data.navCierre;
+    if (data.cuotapartes)                        patch.cuotapartes = data.cuotapartes;
+    if (data.fecha)                              patch.pdf_date    = data.fecha;
+    if (data.ajustes && data.ajustes.length > 0) patch.ajustes     = data.ajustes;
     if (Object.keys(patch).length) {
       await fetch(`${SB_URL}/funds?id=eq.${fundId}`, {
         method: 'PATCH',
@@ -1436,7 +1441,7 @@ async function confirmarCargaPDF() {
       });
     }
 
-    // 4. Actualizar ajustes en memoria
+    // 4. Actualizar ajustes en memoria (también persistido en Supabase arriba)
     if (data.ajustes && data.ajustes.length > 0) AJUSTES[fundId] = data.ajustes;
 
     // 5. Actualizar state.holdings
