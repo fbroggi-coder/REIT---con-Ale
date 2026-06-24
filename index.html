@@ -1027,6 +1027,7 @@ function renderBreakdownPanel(fundId) {
     for (const it of items) {
       if (it.tipo === 'Futuro de Dólar') {
         groups['ARS'] = (groups['ARS'] || 0) - it.monto;
+        groups['USD'] = (groups['USD'] || 0) + it.monto;
       } else {
         groups[it.monedaInstr] = (groups[it.monedaInstr] || 0) + it.monto;
       }
