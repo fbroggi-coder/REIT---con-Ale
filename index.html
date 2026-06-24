@@ -1239,12 +1239,18 @@ async function parsePDF(arrayBuffer) {
     }
   }
 
-  // Ajustes
+  // Ajustes — incluye todos los ítems posibles de todos los fondos.
+  // Los que no aparecen en el PDF simplemente no matchean y se ignoran.
   const ajSpec = [
-    { key: '(+) Disponibilidades',              pat: 'DISPONIBILIDADES',   sign:  1 },
-    { key: '(+) Gastos diferidos (honorarios)', pat: 'GASTOS DIFERIDOS',    sign:  1 },
-    { key: '(−) Provisiones',                   pat: 'PROVISIONES',         sign: -1 },
-    { key: '(−) Acreedores por operaciones',    pat: 'ACREEDORES POR OPER', sign: -1 },
+    { key: '(+) Disponibilidades',              pat: 'DISPONIBILIDADES',          sign:  1 },
+    { key: '(+) Otros créditos no corrientes',  pat: 'OTROS CREDITOS NO CORR',    sign:  1 },
+    { key: '(+) Bienes de cambio',              pat: 'BIENES DE CAMBIO',          sign:  1 },
+    { key: '(+) Cuenta overnight',              pat: 'CUENTA OVERNIGHT',          sign:  1 },
+    { key: '(+) Rentas a cobrar',               pat: 'RENTAS A COBRAR',           sign:  1 },
+    { key: '(+) Gastos diferidos (honorarios)', pat: 'GASTOS DIFERIDOS',          sign:  1 },
+    { key: '(−) Provisiones',                   pat: 'PROVISIONES',               sign: -1 },
+    { key: '(−) Acreedores por operaciones',    pat: 'ACREEDORES POR OPERACION',  sign: -1 },
+    { key: '(−) Honorarios a pagar',            pat: 'HONORARIOS A PAGAR',        sign: -1 },
   ];
   for (const { key, pat, sign } of ajSpec) {
     const line = lines.find(l => l.text.toUpperCase().includes(pat));
