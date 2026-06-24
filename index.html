@@ -1006,7 +1006,7 @@ function renderBreakdownPanel(fundId) {
   const mode = state.breakdown;
   if (!mode) return '';
 
-  const { pn } = calcNAV(fundId);
+  const { pn, totalInv } = calcNAV(fundId);
   if (pn <= 0) return '';
 
   const rawItems = calcMontosCartera(fundId);
@@ -1017,27 +1017,37 @@ function renderBreakdownPanel(fundId) {
     monto:       i.montoDisplay,
   }));
 
+  // Liquidez = PN - subtotal cartera (ajustes + honorarios netos)
+  const liquidez     = pn - totalInv;
+  const fondoMoneda  = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
+
   const groups = {};
 
   if (mode === 'moneda') {
     for (const it of items) {
       if (it.tipo === 'Futuro de Dólar') {
-        // Futuros restan al bucket ARS
         groups['ARS'] = (groups['ARS'] || 0) - it.monto;
       } else {
         groups[it.monedaInstr] = (groups[it.monedaInstr] || 0) + it.monto;
       }
     }
+    // Liquidez en moneda del fondo
+    if (liquidez !== 0) groups[fondoMoneda] = (groups[fondoMoneda] || 0) + liquidez;
+
   } else if (mode === 'tipo') {
     for (const it of items) {
       if (it.tipo === 'Futuro de Dólar') continue;
       groups[it.tipo] = (groups[it.tipo] || 0) + it.monto;
     }
+    // Tipo: no se agrega liquidez (el usuario no lo pidió)
+
   } else {
     for (const it of items) {
       if (it.tipo === 'Futuro de Dólar') continue;
       groups[it.cat] = (groups[it.cat] || 0) + it.monto;
     }
+    // Liquidez en categoría "Liquidez"
+    if (liquidez !== 0) groups['Liquidez'] = (groups['Liquidez'] || 0) + liquidez;
   }
 
   const sorted  = Object.entries(groups).sort((a, b) => b[1] - a[1]);
