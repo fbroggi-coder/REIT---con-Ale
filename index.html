@@ -999,6 +999,7 @@ function renderFondo(fundId) {
         <td class="num">${f2(price)} ${badge}</td>
         <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
         <td class="num">${fARS(monto)}</td>
+        <td class="num" style="color:#9A9AA0">${pn > 0 ? (monto / pn * 100).toFixed(2) + '%' : '—'}</td>
         <td><span class="moneda-badge" style="background:${monedaBg};color:${monedaColor}">${instrMoneda}</span></td>
       </tr>`;
   }).join('');
@@ -1006,7 +1007,7 @@ function renderFondo(fundId) {
   // ── Ajustes rows ─────────────────────────────────────────────────
   const ajusteRows = (AJUSTES[fundId] || []).map(a => `
     <tr>
-      <td colspan="6" class="denom-cell">${a.label}</td>
+      <td colspan="7" class="denom-cell">${a.label}</td>
       <td class="num" style="color:${a.val >= 0 ? '#9A9AA0' : '#D33A3F'}">${fARS(a.val)}</td>
       <td></td>
     </tr>`).join('');
@@ -1014,7 +1015,7 @@ function renderFondo(fundId) {
   // PNIZF ya incluye honorarios en sus ajustes del PDF → no mostrar el calculado
   const honorarioRow = fundId === 'PNIZF' ? '' : `
     <tr>
-      <td colspan="6" class="denom-cell">(−) Honorarios devengados (1 día)</td>
+      <td colspan="7" class="denom-cell">(−) Honorarios devengados (1 día)</td>
       <td class="num" style="color:#D33A3F">${fARS(-honorario)}</td>
       <td></td>
     </tr>`;
@@ -1094,6 +1095,7 @@ function renderFondo(fundId) {
               <th class="num">Px actual</th>
               <th class="num">Var %</th>
               <th class="num">Monto ${moneda}</th>
+              <th class="num">% Patrim.</th>
               <th>Moneda instr.</th>
             </tr>
           </thead>
@@ -1102,7 +1104,7 @@ function renderFondo(fundId) {
 
             <!-- Subtotal cartera -->
             <tr class="total-row">
-              <td colspan="6" style="color:#9A9AA0;font-size:12px">SUBTOTAL CARTERA</td>
+              <td colspan="7" style="color:#9A9AA0;font-size:12px">SUBTOTAL CARTERA</td>
               <td class="num">${fARS(totalInv)}</td>
               <td></td>
             </tr>
@@ -1112,7 +1114,7 @@ function renderFondo(fundId) {
 
             <!-- PN final -->
             <tr class="total-row">
-              <td colspan="6" style="font-size:12px;color:#A6E635">PATRIMONIO NETO LIVE</td>
+              <td colspan="7" style="font-size:12px;color:#A6E635">PATRIMONIO NETO LIVE</td>
               <td class="num" style="color:#A6E635">${fARS(pn)}</td>
               <td></td>
             </tr>
@@ -1197,7 +1199,7 @@ async function init() {
       state.usMap           = live.usMap;
       state.lastPriceUpdate = new Date();
       render();
-    }, 60_000);
+    }, 10 * 60_000);
 
   } catch (e) {
     console.error('[iEB] init error:', e);
