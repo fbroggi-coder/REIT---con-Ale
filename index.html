@@ -617,7 +617,8 @@ function calcNAV(fundId) {
   const ajustes   = AJUSTES[fundId] || [];
   const ajusteSum = ajustes.reduce((s, a) => s + a.val, 0);
   const pnBruto   = totalInv + ajusteSum;
-  const honorario = pnBruto * (cfg.feeAnual || 0) / 365;
+  // PNIZF ya incluye honorarios en los ajustes del PDF → no restar el calculado
+  const honorario = fundId === 'PNIZF' ? 0 : pnBruto * (cfg.feeAnual || 0) / 365;
   const pn        = pnBruto - honorario;
   const navLive   = cfg.cuotapartes > 0 ? pn / cfg.cuotapartes : 0;
   const rend      = cfg.navCierre   > 0 ? navLive / cfg.navCierre - 1 : 0;
@@ -977,7 +978,8 @@ function renderFondo(fundId) {
       <td></td>
     </tr>`).join('');
 
-  const honorarioRow = `
+  // PNIZF ya incluye honorarios en sus ajustes del PDF → no mostrar el calculado
+  const honorarioRow = fundId === 'PNIZF' ? '' : `
     <tr>
       <td colspan="6" class="denom-cell">(−) Honorarios devengados (1 día)</td>
       <td class="num" style="color:#D33A3F">${fARS(-honorario)}</td>
