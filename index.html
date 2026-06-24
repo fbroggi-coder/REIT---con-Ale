@@ -691,7 +691,7 @@ async function cargarMeta() {
   await Promise.all(
     Object.entries(ACTIVOS_TABLE).map(async ([fundId, tabla]) => {
       try {
-        const rows = await sbGet(`/${tabla}?select=ticker,nombre,tipo_activo,moneda,fuente_precio,live_symbol,tasa,lamina`);
+        const rows = await sbGet(`/${tabla}?select=ticker,nombre,tipo_activo,categoria,moneda,fuente_precio,live_symbol,tasa,lamina`);
         const fondoMeta = {};
         for (const r of rows) {
           const fuente = r.fuente_precio || 'hold';
@@ -699,6 +699,7 @@ async function cargarMeta() {
           const entry  = {
             denom:      r.nombre     || r.ticker,
             tipo:       r.tipo_activo || 'Otros',
+            categoria:  r.categoria  || '',
             moneda:     r.moneda     || 'ARS',
             fuente,
             kind,
