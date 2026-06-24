@@ -462,7 +462,10 @@ const FUENTE_KIND = {
   'data912_arg_corp':      'market',
   'data912_arg_notes':     'market',
   'data912_arg_stocks':    'market',
+  'data912_arg_cedears':   'market',
+  'data912_arg_options':   'market',
   'data912_us_stocks':     'usMarket',
+  'data912_us_adrs':       'usMarket',
   'calculo MM usd':        'mmUsd',
   'calculo devengamiento': 'devengo',
   'calculo MM ars':        'mmArs',
@@ -746,17 +749,19 @@ async function actualizarPrecios() {
 
 async function fetchLivePrecios() {
   try {
-    const [bonds, corp, notes, mepArr, cclArr] = await Promise.all([
+    const [bonds, corp, notes, mepArr, cclArr, cedears, options] = await Promise.all([
       fetch('https://data912.com/live/arg_bonds').then(r => r.json()).catch(() => []),
       fetch('https://data912.com/live/arg_corp').then(r => r.json()).catch(() => []),
       fetch('https://data912.com/live/arg_notes').then(r => r.json()).catch(() => []),
       fetch('https://data912.com/live/mep').then(r => r.json()).catch(() => []),
       fetch('https://data912.com/live/ccl').then(r => r.json()).catch(() => []),
+      fetch('https://data912.com/live/arg_cedears').then(r => r.json()).catch(() => []),
+      fetch('https://data912.com/live/arg_options').then(r => r.json()).catch(() => []),
     ]);
 
-    // Market map (bonos, corporativos, letras)
+    // Market map (bonos, corporativos, letras, cedears, opciones — todos en ARS)
     const marketMap = {};
-    for (const arr of [bonds, corp, notes]) {
+    for (const arr of [bonds, corp, notes, cedears, options]) {
       for (const o of (arr || [])) {
         if (o && o.symbol) marketMap[o.symbol] = o;
       }
