@@ -1867,8 +1867,8 @@ async function abrirEditarActivo(fundId, ticker) {
     a = arr[0] || {};
   } catch(e) {}
 
-  const TIPO_LISTA_ED = ['Commodities', 'Compra Call', 'Covered Call', 'Equity Argentina', 'Equity USA', 'Money Market ARS', 'Money Market USD', 'ON DL', 'ON HD', 'Pagare ARS', 'Pagare USD', 'Short Equity', 'Short Renta Fija', 'Soberano DL', 'Soberano HD', 'Soberanos ARS', 'Venta Call'];
-  const CAT_LISTA_ED  = ['Commodities', 'Compra Call', 'Covered Call', 'Equity', 'Liquidez', 'Renta Fija', 'Short Equity', 'Short Renta Fija', 'Venta Call'];
+  const TIPO_LISTA_ED = ['Commodities', 'Compra Call', 'Covered Call', 'Equity Argentina', 'Equity USA', 'Futuro de Dólar', 'Money Market ARS', 'Money Market USD', 'ON DL', 'ON HD', 'Pagare ARS', 'Pagare USD', 'Short Equity', 'Short Renta Fija', 'Soberano DL', 'Soberano HD', 'Soberanos ARS', 'Venta Call'];
+  const CAT_LISTA_ED  = ['Commodities', 'Compra Call', 'Covered Call', 'Equity', 'Futuro de Dólar', 'Liquidez', 'Renta Fija', 'Short Equity', 'Short Renta Fija', 'Venta Call'];
   const FUENTE_LISTA_ED = Object.keys(FUENTE_KIND);
 
   const tipoOpts = TIPO_LISTA_ED.map(t => `<option value="${t}" ${t===a.tipo_activo?'selected':''}>${t}</option>`).join('');
