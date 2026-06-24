@@ -968,6 +968,9 @@ function renderFondo(fundId) {
   const rendColor = pos ? '#A6E635' : (neg ? '#D33A3F' : '#9A9AA0');
 
   // ── Holdings rows ────────────────────────────────────────────────
+  const tiposUnicos = [...new Set(holdings.map(h => fondoMeta[h.ticker]?.tipo).filter(Boolean))].sort();
+  const catsUnicas  = [...new Set(holdings.map(h => fondoMeta[h.ticker]?.categoria).filter(Boolean))].sort();
+
   const rows = holdings.map(h => {
     const meta   = fondoMeta[h.ticker];
     const instrMoneda = meta?.moneda || 'ARS';
@@ -977,6 +980,7 @@ function renderFondo(fundId) {
     const varPct  = cierre > 0 ? price / cierre - 1 : 0;
     const monto   = h.cantidad * (price / lamina);
     const tipo    = meta?.tipo   || 'Otros';
+    const cat     = meta?.categoria || '';
     const dot     = dotColor(tipo);
     const varColor = Math.abs(varPct) < 1e-9 ? '#9A9AA0' : (varPct > 0 ? '#2E9E2A' : '#D33A3F');
     const badge   = live
@@ -986,7 +990,7 @@ function renderFondo(fundId) {
     const monedaColor = instrMoneda === 'USD' ? '#3F6212' : '#5B21B6';
 
     return `
-      <tr>
+      <tr class="holding-row" data-ticker="${h.ticker.toLowerCase()}" data-tipo="${tipo}" data-cat="${cat}">
         <td><span class="ticker-chip">${h.ticker}</span></td>
         <td class="denom-cell">${meta?.denom || h.ticker}</td>
         <td class="num">${fNum(h.cantidad)}</td>
@@ -1059,6 +1063,25 @@ function renderFondo(fundId) {
         </label>
       </div>
 
+      <!-- Filter bar -->
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">
+        <div style="position:relative;flex:1;min-width:160px;max-width:280px">
+          <svg style="position:absolute;left:10px;top:50%;transform:translateY(-50%);pointer-events:none" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#5A5A60" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input id="flt-ticker" oninput="filtrarHoldings()" placeholder="Buscar ticker…"
+            style="width:100%;box-sizing:border-box;padding:7px 10px 7px 30px;background:#1A1A20;border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:#E5E5E7;font-size:12px;font-family:inherit;outline:none">
+        </div>
+        <select id="flt-tipo" onchange="filtrarHoldings()"
+          style="padding:7px 10px;background:#1A1A20;border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:#E5E5E7;font-size:12px;font-family:inherit;outline:none;cursor:pointer">
+          <option value="">Todos los tipos</option>
+          ${tiposUnicos.map(t => `<option value="${t}">${t}</option>`).join('')}
+        </select>
+        <select id="flt-cat" onchange="filtrarHoldings()"
+          style="padding:7px 10px;background:#1A1A20;border:1px solid rgba(255,255,255,0.08);border-radius:8px;color:#E5E5E7;font-size:12px;font-family:inherit;outline:none;cursor:pointer">
+          <option value="">Todas las categorías</option>
+          ${catsUnicas.map(c => `<option value="${c}">${c}</option>`).join('')}
+        </select>
+      </div>
+
       <div class="table-wrap">
         <table>
           <thead>
@@ -1096,6 +1119,19 @@ function renderFondo(fundId) {
         </table>
       </div>
     </div>`;
+}
+
+// ── FILTRO DE HOLDINGS ───────────────────────────────────────────────
+function filtrarHoldings() {
+  const ticker = (document.getElementById('flt-ticker')?.value || '').toLowerCase().trim();
+  const tipo   = document.getElementById('flt-tipo')?.value  || '';
+  const cat    = document.getElementById('flt-cat')?.value   || '';
+  document.querySelectorAll('tr.holding-row').forEach(tr => {
+    const okTicker = !ticker || tr.dataset.ticker.includes(ticker);
+    const okTipo   = !tipo   || tr.dataset.tipo === tipo;
+    const okCat    = !cat    || tr.dataset.cat  === cat;
+    tr.style.display = (okTicker && okTipo && okCat) ? '' : 'none';
+  });
 }
 
 // ── EVENTOS ──────────────────────────────────────────────────────────
