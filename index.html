@@ -1249,36 +1249,69 @@ async function parsePDF(arrayBuffer) {
   const numPat = /\d{1,3}(?:\.\d{3})*,\d+/g;
   const fullText = lines.map(l => l.text).join('\n');
 
+  // Detección temprana de formato
+  const isCicloNovaPDF = fullText.includes('IsinCode') && !fullText.includes('Abreviatura');
+
   // Fecha
   const fechaM = fullText.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
   if (fechaM) res.fecha = fechaM[1];
 
-  // NAV y cuotapartes (fila "A" en DETALLE)
-  const detIdx = lines.findIndex(l => l.text.includes('DETALLE') && l.text.includes('GENERACION'));
-  if (detIdx !== -1) {
-    for (let i = detIdx + 1; i < Math.min(detIdx + 20, lines.length); i++) {
-      if (/^A\b/.test(lines[i].text)) {
-        const nums = [...lines[i].text.matchAll(numPat)].map(m => parseArNum(m[0])).filter(n => n > 0);
-        if (nums.length >= 3) { res.cuotapartes = nums[1]; res.navCierre = nums[2]; }
-        break;
+  // NAV y cuotapartes
+  if (isCicloNovaPDF) {
+    // CICLO_NOVA: buscar "Valor del Día" en tabla de cuotapartes
+    const valorDiaLine = lines.find(l => /valor del d[íi]a/i.test(l.text));
+    if (valorDiaLine) {
+      // Número puede venir como "1.151,5000" (AR) o con formato distinto
+      const navNums = [...valorDiaLine.text.matchAll(numPat)].map(m => parseArNum(m[0])).filter(n => n > 0);
+      if (navNums.length) {
+        res.navCierre = navNums[navNums.length - 1];
+        console.log('[PDF CICLO_NOVA] NAV cierre encontrado:', res.navCierre, '| línea:', valorDiaLine.text.substring(0, 80));
+      } else {
+        // Fallback: extraer cualquier número de más de 3 dígitos
+        const fallback = valorDiaLine.text.match(/[\d]+[.,][\d]+/g);
+        if (fallback) {
+          res.navCierre = parseFloat(fallback[fallback.length - 1].replace(',', '.'));
+          console.log('[PDF CICLO_NOVA] NAV cierre (fallback):', res.navCierre);
+        }
+      }
+    } else {
+      console.warn('[PDF CICLO_NOVA] No se encontró línea "Valor del Día"');
+    }
+  } else {
+    // REIT / PNIZF: fila "A" en DETALLE
+    const detIdx = lines.findIndex(l => l.text.includes('DETALLE') && l.text.includes('GENERACION'));
+    if (detIdx !== -1) {
+      for (let i = detIdx + 1; i < Math.min(detIdx + 20, lines.length); i++) {
+        if (/^A\b/.test(lines[i].text)) {
+          const nums = [...lines[i].text.matchAll(numPat)].map(m => parseArNum(m[0])).filter(n => n > 0);
+          if (nums.length >= 3) { res.cuotapartes = nums[1]; res.navCierre = nums[2]; }
+          break;
+        }
       }
     }
   }
 
   // Ajustes — incluye todos los ítems posibles de todos los fondos.
   // Los que no aparecen en el PDF simplemente no matchean y se ignoran.
+  // fmt: 'cn' = solo CICLO_NOVA, 'rp' = solo REIT/PNIZF, undefined = todos
   const ajSpec = [
     { key: '(+) Disponibilidades',              pat: 'DISPONIBILIDADES',          sign:  1 },
-    { key: '(+) Otros créditos no corrientes',  pat: 'OTROS CREDITOS NO CORR',    sign:  1 },
+    { key: '(+) Otros créditos no corrientes',  pat: 'OTROS CREDITOS NO CORR',    sign:  1, fmt: 'rp' },
     { key: '(+) Bienes de cambio',              pat: 'BIENES DE CAMBIO',          sign:  1 },
     { key: '(+) Cuenta overnight',              pat: 'CUENTA OVERNIGHT',          sign:  1 },
     { key: '(+) Rentas a cobrar',               pat: 'RENTAS A COBRAR',           sign:  1 },
     { key: '(+) Gastos diferidos (honorarios)', pat: 'GASTOS DIFERIDOS',          sign:  1 },
+    { key: '(+) Créditos',                      pat: 'CREDITOS',                  sign:  1, fmt: 'cn' },
+    { key: '(+) Bony',                          pat: 'BONY',                      sign:  1, fmt: 'cn' },
+    { key: '(+) Deudores por operaciones',      pat: 'DEUDORES POR OPERACION',    sign:  1, fmt: 'cn' },
     { key: '(−) Provisiones',                   pat: 'PROVISIONES',               sign: -1 },
-    { key: '(−) Acreedores por operaciones',    pat: 'ACREEDORES POR OPERACION',  sign: -1 },
+    { key: '(−) Acreedores',                    pat: 'ACREEDORES',                sign: -1 },
     { key: '(−) Honorarios a pagar',            pat: 'HONORARIOS A PAGAR',        sign: -1 },
   ];
-  for (const { key, pat, sign } of ajSpec) {
+  for (const { key, pat, sign, fmt } of ajSpec) {
+    // Filtrar por formato de PDF si corresponde
+    if (fmt === 'cn' && !isCicloNovaPDF) continue;
+    if (fmt === 'rp' &&  isCicloNovaPDF) continue;
     const line = lines.find(l => l.text.toUpperCase().includes(pat));
     if (!line) continue;
     const nums = [...line.text.matchAll(numPat)];
