@@ -472,6 +472,7 @@ const FUENTE_KIND = {
   'devengamiento ARS':     'devengoARS',
   'globo':                 'hold',
   'hold':                  'hold',
+  'yahoo':                 'yahoo',
 };
 
 // Días hábiles hasta liquidación (para devengamiento)
@@ -507,7 +508,7 @@ function nextBizDays() {
 //   devengo     → cierre × (1+TNA/365×n)  (devenga en USD)
 //   devengoARS  → cierre × (1+TNA/365×n) / MEP_hoy  (ARS→USD)
 //
-function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canje) {
+function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canje, yahooMap) {
   const kind   = meta?.kind   || 'hold';
   const tipo   = meta?.tipo   || '';
   const tasa   = meta?.tasa   ?? null;
@@ -610,6 +611,15 @@ function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canj
     return { price: base, live: false };
   }
 
+  // ── YAHOO FINANCE (acciones USA sin precio en data912) ──────────
+  if (kind === 'yahoo') {
+    const yPrice = yahooMap?.[sym];
+    if (yPrice > 0) {
+      return { price: canje > 0 ? yPrice / canje : yPrice, live: true };
+    }
+    return { price: base, live: false };
+  }
+
   // ── HOLD / fallback ──────────────────────────────────────────────
   return { price: base, live: false };
 }
@@ -630,7 +640,7 @@ function calcNAV(fundId) {
     const m = meta[h.ticker];
     // Los futuros de dólar no suman al PN
     if (m?.tipo === 'Futuro de Dólar') continue;
-    const { price } = calcPrecio(h, m, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje);
+    const { price } = calcPrecio(h, m, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
     const lamina = m?.lamina || 1;
     totalInv += h.cantidad * (price / lamina);
   }
@@ -763,6 +773,7 @@ async function actualizarPrecios() {
     state.canje           = live.canje;
     state.marketMap       = live.marketMap;
     state.usMap           = live.usMap;
+    state.yahooMap        = live.yahooMap || {};
     state.lastPriceUpdate = new Date();
   } finally {
     state.updatingPrices = false;
@@ -812,7 +823,32 @@ async function fetchLivePrecios() {
       for (const o of (arr || [])) { if (o && o.symbol) usMap[o.symbol] = o; }
     }
 
-    return { fxLive, canje, marketMap, usMap };
+    // ── YAHOO FINANCE ──────────────────────────────────────────────
+    const yahooSymbols = [...new Set(
+      Object.values(state.meta)
+        .flatMap(m => Object.values(m))
+        .filter(e => e.kind === 'yahoo' && e.liveSymbol)
+        .map(e => e.liveSymbol)
+    )];
+    const yahooMap = {};
+    if (yahooSymbols.length > 0) {
+      try {
+        const yUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${yahooSymbols.join(',')}`;
+        const yData = await fetch(yUrl).then(r => r.json()).catch(() => null);
+        if (yData?.quoteResponse?.result) {
+          for (const q of yData.quoteResponse.result) {
+            if (q.symbol && q.regularMarketPrice > 0) {
+              yahooMap[q.symbol] = q.regularMarketPrice;
+              console.log('[Yahoo]', q.symbol, '=', q.regularMarketPrice, 'USD');
+            }
+          }
+        }
+      } catch(e) {
+        console.warn('[iEB] Yahoo Finance error:', e);
+      }
+    }
+
+    return { fxLive, canje, marketMap, usMap, yahooMap };
   } catch (e) {
     console.warn('[iEB] fetchLivePrecios error:', e);
     return { fxLive: 0, canje: 1, marketMap: {}, usMap: {} };
@@ -839,6 +875,7 @@ const state = {
   lastPriceUpdate: null,  // Date de la última actualización de precios
   updatingPrices:  false, // true mientras se está actualizando
   breakdown:       null,  // null | 'moneda' | 'tipo' | 'cat'
+  yahooMap:        {},    // { symbol: priceUSD } desde Yahoo Finance
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -973,7 +1010,7 @@ function calcMontosCartera(fundId) {
 
   const items = holdings.map(h => {
     const meta   = fondoMeta[h.ticker];
-    const { price } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje);
+    const { price } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
     const lamina  = meta?.lamina || 1;
     const monto   = h.cantidad * (price / lamina);
     const tipo    = meta?.tipo || 'Otros';
@@ -1099,7 +1136,7 @@ function renderFondo(fundId) {
   const rows = holdings.map(h => {
     const meta   = fondoMeta[h.ticker];
     const instrMoneda = meta?.moneda || 'ARS';
-    const { price, live } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje);
+    const { price, live } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
     const lamina  = meta?.lamina || 1;
     const cierre  = h.cierre * lamina;
     const varPct  = cierre > 0 ? price / cierre - 1 : 0;
@@ -1331,6 +1368,7 @@ async function init() {
     state.canje           = live.canje;
     state.marketMap       = live.marketMap;
     state.usMap           = live.usMap;
+    state.yahooMap        = live.yahooMap || {};
     state.lastPriceUpdate = new Date();
     render();
 
@@ -1340,6 +1378,7 @@ async function init() {
       state.canje           = live.canje;
       state.marketMap       = live.marketMap;
       state.usMap           = live.usMap;
+      state.yahooMap        = live.yahooMap || {};
       state.lastPriceUpdate = new Date();
       render();
     }, 10 * 60_000);
