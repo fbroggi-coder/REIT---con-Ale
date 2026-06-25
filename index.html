@@ -836,7 +836,7 @@ async function fetchLivePrecios() {
         const yUrl = 'https://xyoxonwufbrorwsoyyce.supabase.co/functions/v1/yahoo-prices';
         const yData = await fetch(yUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...SB_HDR },
+          headers: { 'Content-Type': 'application/json', 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY },
           body: JSON.stringify({ symbols: yahooSymbols }),
         }).then(r => r.json()).catch(() => null);
         if (yData?.quoteResponse?.result) {
