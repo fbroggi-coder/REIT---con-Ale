@@ -833,8 +833,12 @@ async function fetchLivePrecios() {
     const yahooMap = {};
     if (yahooSymbols.length > 0) {
       try {
-        const yUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${yahooSymbols.join(',')}`;
-        const yData = await fetch(yUrl).then(r => r.json()).catch(() => null);
+        const yUrl = 'https://xyoxonwufbrorwsoyyce.supabase.co/functions/v1/yahoo-prices';
+        const yData = await fetch(yUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...SB_HDR },
+          body: JSON.stringify({ symbols: yahooSymbols }),
+        }).then(r => r.json()).catch(() => null);
         if (yData?.quoteResponse?.result) {
           for (const q of yData.quoteResponse.result) {
             if (q.symbol && q.regularMarketPrice > 0) {
