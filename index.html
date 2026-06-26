@@ -810,10 +810,13 @@ async function fetchLivePrecios() {
     for (const o of (cclArr || [])) { if (o && o.ticker) cclMap[o.ticker] = o; }
 
     const mepRow = mepMap['AL30'] || mepMap['GD30'] || mepMap['AL30D'];
-    const cclRow = cclMap['AL30'] || cclMap['GD30'] || cclMap['AL30C'];
+    // CCL: promedio de acciones líquidas — GGAL, YPFD, LOMA, SUPV
+    const CCL_TICKERS = ['GGAL', 'YPFD', 'BMA'];
+    const cclValues = CCL_TICKERS.map(t => cclMap[t]?.CCL_close || 0).filter(v => v > 0);
     const fxLive  = mepRow ? (mepRow.mark || mepRow.close || 0) : 0;
-    const fxCCL   = cclRow ? (cclRow.mark || cclRow.close || 0) : 0;
+    const fxCCL   = cclValues.length > 0 ? cclValues.reduce((a, b) => a + b, 0) / cclValues.length : 0;
     const canje   = fxLive > 0 && fxCCL > 0 ? fxCCL / fxLive : 1;
+    console.log('[CCL] fxCCL:', fxCCL.toFixed(2), '| canje:', canje.toFixed(4));
 
     // USA stocks (para fondos USD)
     const [usStk, usAdr] = await Promise.all([
