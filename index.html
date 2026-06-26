@@ -1169,8 +1169,8 @@ function renderFondo(fundId) {
         <td class="num">${f2(cierre)}</td>
         <td class="num">${f2(price)} ${badge}</td>
         <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
-        <td class="num">${fARS(monto)}</td>
-        <td class="num" style="color:#9A9AA0">${pn > 0 ? (montoDisplay / pn * 100).toFixed(2) + '%' : '—'}</td>
+        <td class="num">${fARS(montoDisplay)}</td>
+        <td class="num" style="color:#9A9AA0">${pn > 0 ? (Math.abs(montoDisplay) / pn * 100).toFixed(2) + '%' : '—'}</td>
         <td><span class="moneda-badge" style="background:${monedaBg};color:${monedaColor}">${instrMoneda}</span></td>
       </tr>`;
   }).join('');
