@@ -556,7 +556,7 @@ function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canj
       const priceUSD = raw.c;
       if (fondoMoneda === 'USD')
         // Precio USD cable → USD MEP dividiendo por canje (CCL/MEP)
-        return { price: canje > 0 ? priceUSD / canje : priceUSD, live: canje > 0 };
+        return { price: canje > 0 ? priceUSD * canje : priceUSD, live: canje > 0 };
       // Fondo ARS: USD cable → ARS vía CCL
       return { price: priceUSD * fxNow * canje, live: fxNow > 0 };
     }
@@ -615,7 +615,7 @@ function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canj
   if (kind === 'yahoo') {
     const yPrice = yahooMap?.[sym];
     if (yPrice > 0) {
-      return { price: canje > 0 ? yPrice / canje : yPrice, live: true };
+      return { price: canje > 0 ? yPrice * canje : yPrice, live: true };
     }
     return { price: base, live: false };
   }
