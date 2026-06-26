@@ -807,7 +807,7 @@ async function fetchLivePrecios() {
     // MEP y CCL
     const mepMap = {}, cclMap = {};
     for (const o of (mepArr || [])) { if (o && o.ticker) mepMap[o.ticker] = o; }
-    for (const o of (cclArr || [])) { if (o && o.ticker) cclMap[o.ticker] = o; }
+    for (const o of (cclArr || [])) { if (o && o.ticker_ar) cclMap[o.ticker_ar] = o; }
 
     const mepRow = mepMap['AL30'] || mepMap['GD30'] || mepMap['AL30D'];
     // CCL: promedio de acciones líquidas — GGAL, YPFD, LOMA, SUPV
