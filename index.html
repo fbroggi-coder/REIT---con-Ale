@@ -1030,9 +1030,11 @@ function calcMontosCartera(fundId) {
   const mmUsdAdj      = mmUsdItems.length > 0 ? totalNotional / mmUsdItems.length : 0;
 
   return items.map(i => {
+    const isShortCall = ['Covered Call', 'Venta Call'].includes(i.tipo);
     let montoDisplay = i.monto;
-    if (i.isOpt)                       montoDisplay = i.monto + i.notional;
+    if (i.isOpt)                           montoDisplay = i.monto + i.notional;
     else if (i.tipo === 'Money Market USD') montoDisplay = i.monto - mmUsdAdj;
+    if (isShortCall) montoDisplay = -Math.abs(montoDisplay);
     return { ...i, montoDisplay };
   });
 }
@@ -1143,7 +1145,10 @@ function renderFondo(fundId) {
     const { price, live } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
     const lamina  = meta?.lamina || 1;
     const cierre  = h.cierre * lamina;
-    const varPct  = cierre > 0 ? price / cierre - 1 : 0;
+    const isShortCall = ['Covered Call', 'Venta Call'].includes(tipo);
+    const varPct  = cierre > 0
+      ? (isShortCall ? cierre / price - 1 : price / cierre - 1)
+      : 0;
     const monto   = h.cantidad * (price / lamina);
     const tipo    = meta?.tipo   || 'Otros';
     const cat     = meta?.categoria || '';
