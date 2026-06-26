@@ -642,7 +642,9 @@ function calcNAV(fundId) {
     if (m?.tipo === 'Futuro de Dólar') continue;
     const { price } = calcPrecio(h, m, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
     const lamina = m?.lamina || 1;
-    totalInv += h.cantidad * (price / lamina);
+    const montoH = h.cantidad * (price / lamina);
+    const isShortCallH = ['Covered Call', 'Venta Call'].includes(m?.tipo);
+    totalInv += isShortCallH ? -Math.abs(montoH) : montoH;
   }
 
   const ajustes   = AJUSTES[fundId] || [];
@@ -1034,8 +1036,10 @@ function calcMontosCartera(fundId) {
     let montoDisplay = i.monto;
     if (i.isOpt)                           montoDisplay = i.monto + i.notional;
     else if (i.tipo === 'Money Market USD') montoDisplay = i.monto - mmUsdAdj;
-    if (isShortCall) montoDisplay = -Math.abs(montoDisplay);
-    return { ...i, montoDisplay };
+    // montoDisplay: ajuste nocional, positivo → para % Patrim y breakdowns
+    // montoTabla: precio × cantidad simple, negativo para short calls → para columna Monto y totalInv
+    const montoTabla = isShortCall ? -Math.abs(i.monto) : montoDisplay;
+    return { ...i, montoDisplay, montoTabla };
   });
 }
 
@@ -1137,7 +1141,8 @@ function renderFondo(fundId) {
   const tiposUnicos  = [...new Set(holdings.map(h => fondoMeta[h.ticker]?.tipo).filter(Boolean))].sort();
   const catsUnicas   = [...new Set(holdings.map(h => fondoMeta[h.ticker]?.categoria).filter(Boolean))].sort();
   const montosAjust  = calcMontosCartera(fundId); // mapa ticker → montoDisplay
-  const montosMap    = Object.fromEntries(montosAjust.map(i => [i.ticker, i.montoDisplay]));
+  const montosMap      = Object.fromEntries(montosAjust.map(i => [i.ticker, i.montoDisplay]));
+  const montosTablaMap = Object.fromEntries(montosAjust.map(i => [i.ticker, i.montoTabla]));
 
   const rows = holdings.map(h => {
     const meta   = fondoMeta[h.ticker];
@@ -1152,7 +1157,8 @@ function renderFondo(fundId) {
       ? (isShortCall ? cierre / price - 1 : price / cierre - 1)
       : 0;
     const cat     = meta?.categoria || '';
-    const montoDisplay = montosMap[h.ticker] ?? monto;
+    const montoDisplay = montosMap[h.ticker]     ?? monto;
+    const montoTabla   = montosTablaMap[h.ticker] ?? monto;
     const dot     = dotColor(tipo);
     const varColor = Math.abs(varPct) < 1e-9 ? '#9A9AA0' : (varPct > 0 ? '#2E9E2A' : '#D33A3F');
     const badge   = live
@@ -1169,8 +1175,8 @@ function renderFondo(fundId) {
         <td class="num">${f2(cierre)}</td>
         <td class="num">${f2(price)} ${badge}</td>
         <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
-        <td class="num">${fARS(montoDisplay)}</td>
-        <td class="num" style="color:#9A9AA0">${pn > 0 ? (Math.abs(montoDisplay) / pn * 100).toFixed(2) + '%' : '—'}</td>
+        <td class="num">${fARS(montoTabla)}</td>
+        <td class="num" style="color:#9A9AA0">${pn > 0 ? (montoDisplay / pn * 100).toFixed(2) + '%' : '—'}</td>
         <td><span class="moneda-badge" style="background:${monedaBg};color:${monedaColor}">${instrMoneda}</span></td>
       </tr>`;
   }).join('');
