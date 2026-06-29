@@ -1634,7 +1634,7 @@ async function parsePDF(arrayBuffer) {
     if (t.startsWith('Total Inversiones') ||
         (t.startsWith('Total') && /\d{9,}/.test(t.replace(/\./g, '').replace(/,/g, ''))) ||
         (!isCicloNova && (t.startsWith('(1) Sobre') || t.startsWith('MONEDAS') || t.includes('Todos los importes'))) ||
-        (isCicloNova && (t === 'Disponibilidades' || /^Clase (A|B|Ley)$/.test(t) || t.startsWith('La Duration') || /Aperturas.*Cauciones/i.test(t) || /^Aperturas[,\s]/i.test(t)))) {
+        (isCicloNova && (t === 'Disponibilidades' || /^Clase (A|B|Ley)$/.test(t) || t.startsWith('La Duration')))) {
       totIdx = i; break;
     }
   }
@@ -1737,10 +1737,10 @@ async function parsePDF(arrayBuffer) {
         const lt = lines[i].text.trim();
         if (!lt) continue;
         // Parar en próxima sección
-        // Nota: test sin /i para distinguir "APERTURA" (dato) de "Aperturas" (título de sección)
+        // Usar \s después de la keyword: "APERTURA 29/6/..." es dato, "APERTURAS," es header
         if (/^(Aperturas|Disponibilidades|Total\s|La Duration|Clase\s)/i.test(lt) &&
-            !/^(APERTURA|CAUCION|PASE)/.test(lt)) break;
-        if (!/^(APERTURA|CAUCION|PASE)/i.test(lt)) continue;
+            !/^(APERTURA|CAUCION|PASE)\s/.test(lt)) break;
+        if (!/^(APERTURA|CAUCION|PASE)\s/i.test(lt)) continue;
         const nums = [...lt.matchAll(numPat)].map(m => parseArNum(m[0])).filter(n => n > 0);
         if (nums.length < 2) continue;
         // Columnas: Tipo Vencimiento Concertación Plazo Tasa Total %
