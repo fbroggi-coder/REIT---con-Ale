@@ -1033,17 +1033,21 @@ function calcMontosCartera(fundId) {
   if (!applyAdj) return items.map(i => ({ ...i, montoDisplay: i.monto }));
 
   const totalNotional = items.reduce((s, i) => s + i.notional, 0);
-  const mmUsdItems    = items.filter(i => i.tipo === 'Money Market USD');
-  // Cap the adjustment so no MM USD item goes negative
-  const totalMmUsd = mmUsdItems.reduce((s, i) => s + i.monto, 0);
-  const effNotional = Math.min(totalNotional, totalMmUsd);
-  const mmUsdAdj    = mmUsdItems.length > 0 ? effNotional / mmUsdItems.length : 0;
+  // Distribuir nocional proporcionalmente entre MM USD y Caución USD
+  const LIQUIDEZ_USD = ['Money Market USD', 'Caución USD'];
+  const liqItems     = items.filter(i => LIQUIDEZ_USD.includes(i.tipo));
+  const totalLiqUsd  = liqItems.reduce((s, i) => s + i.monto, 0);
 
   return items.map(i => {
     const isShortCall = ['Covered Call', 'Venta Call'].includes(i.tipo);
     let montoDisplay = i.monto;
-    if (i.isOpt)                           montoDisplay = i.monto + i.notional;
-    else if (i.tipo === 'Money Market USD') montoDisplay = Math.max(0, i.monto - mmUsdAdj);
+    if (i.isOpt) {
+      montoDisplay = i.monto + i.notional;
+    } else if (LIQUIDEZ_USD.includes(i.tipo)) {
+      // Cada item absorbe su parte proporcional del nocional
+      const share = totalLiqUsd > 0 ? i.monto / totalLiqUsd : 0;
+      montoDisplay = Math.max(0, i.monto - totalNotional * share);
+    }
     // montoDisplay: ajuste nocional, positivo → para % Patrim y breakdowns
     // montoTabla: precio × cantidad simple, negativo para short calls → para columna Monto y totalInv
     const montoTabla = isShortCall ? -Math.abs(i.monto) : montoDisplay;
