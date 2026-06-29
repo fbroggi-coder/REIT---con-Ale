@@ -705,7 +705,7 @@ async function cargarMeta() {
   await Promise.all(
     Object.entries(ACTIVOS_TABLE).map(async ([fundId, tabla]) => {
       try {
-        const rows = await sbGet(`/${tabla}?select=ticker,nombre,tipo_activo,categoria,moneda,fuente_precio,live_symbol,tasa,lamina,base`);
+        const rows = await sbGet(`/${tabla}?select=ticker,nombre,tipo_activo,categoria,moneda,fuente_precio,live_symbol,tasa,lamina,base,precio_inicial`);
         const fondoMeta = {};
         for (const r of rows) {
           const fuente = r.fuente_precio || 'hold';
@@ -721,7 +721,8 @@ async function cargarMeta() {
             tasa:       r.tasa   != null ? parseFloat(r.tasa)   : null,
             lamina:     r.lamina != null ? parseFloat(r.lamina)
                                         : (fuente.startsWith('data912') ? 100 : 1),
-            base:       r.base   != null ? parseFloat(r.base)   : 0,
+            base:          r.base          != null ? parseFloat(r.base)          : 0,
+            precioInicial: r.precio_inicial != null ? parseFloat(r.precio_inicial) : null,
           };
           fondoMeta[r.ticker] = entry;
           if (r.live_symbol && r.live_symbol !== r.ticker) fondoMeta[r.live_symbol] = entry;
@@ -1171,6 +1172,13 @@ function renderFondo(fundId) {
       ? (isShortCall ? cierre / price - 1 : price / cierre - 1)
       : 0;
     const cat     = meta?.categoria || '';
+    const precioInicial = meta?.precioInicial ?? null;
+    const varHist = precioInicial > 0
+      ? (isShortCall ? precioInicial / priceDisplay - 1 : priceDisplay / precioInicial - 1)
+      : null;
+    const varHistColor = varHist === null ? '#9A9AA0'
+      : Math.abs(varHist) < 1e-9  ? '#9A9AA0'
+      : varHist > 0               ? '#2E9E2A' : '#D33A3F';
     const montoDisplay = montosMap[h.ticker]     ?? monto;
     const montoTabla   = montosTablaMap[h.ticker] ?? monto;
     const dot     = dotColor(tipo);
@@ -1189,6 +1197,7 @@ function renderFondo(fundId) {
         <td class="num">${f2(cierre)}</td>
         <td class="num">${f2(priceDisplay)} ${badge}</td>
         <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
+        <td class="num" style="color:${varHistColor}">${varHist !== null ? fPct(varHist) : '—'}</td>
         <td class="num">${fARS(montoTabla)}</td>
         <td class="num" style="color:#9A9AA0">${pn > 0 ? (montoDisplay / pn * 100).toFixed(2) + '%' : '—'}</td>
         <td><span class="moneda-badge" style="background:${monedaBg};color:${monedaColor}">${instrMoneda}</span></td>
@@ -1302,6 +1311,7 @@ function renderFondo(fundId) {
               <th class="num">Px cierre</th>
               <th class="num">Px actual</th>
               <th class="num">Var %</th>
+              <th class="num">Var Hist.</th>
               <th class="num">Monto ${moneda}</th>
               <th class="num">% Patrim.</th>
               <th>Moneda instr.</th>
@@ -2227,6 +2237,10 @@ async function abrirEditarActivo(fundId, ticker) {
           <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">LIVE SYMBOL</label>
           <input class="cms-input" id="ed-sym" value="${a.live_symbol || ticker}" style="width:100%;font-family:'JetBrains Mono',monospace;font-size:12px">
         </div>
+        <div>
+          <label style="font-size:11px;color:#5A5A60;font-weight:700;display:block;margin-bottom:5px">PRECIO INICIAL (moneda del fondo)</label>
+          <input class="cms-input" id="ed-pi" value="${a.precio_inicial ?? ''}" placeholder="—" style="width:100%;font-family:'JetBrains Mono',monospace;font-size:12px">
+        </div>
       </div>
       <div class="modal-footer">
         <button class="btn-secondary" onclick="closeModal()">Cancelar</button>
@@ -2246,7 +2260,8 @@ async function guardarEditarActivo(fundId, ticker) {
     live_symbol:   document.getElementById('ed-sym')?.value?.trim(),
     tasa:          parseFloat(document.getElementById('ed-tas')?.value) || null,
     lamina:        parseFloat(document.getElementById('ed-lam')?.value) || 1,
-    base:          document.getElementById('ed-bas')?.value?.trim() || null,
+    base:           document.getElementById('ed-bas')?.value?.trim() || null,
+    precio_inicial: parseFloat(document.getElementById('ed-pi')?.value) || null,
   };
   try {
     const r = await fetch(`${SB_URL}/${tabla}?ticker=eq.${encodeURIComponent(ticker)}`, {
