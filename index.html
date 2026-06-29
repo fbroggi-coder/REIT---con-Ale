@@ -1156,7 +1156,9 @@ function renderFondo(fundId) {
     const monto   = h.cantidad * (price / lamina);
     const tipo    = meta?.tipo   || 'Otros';
     const isShortCall = ['Covered Call', 'Venta Call'].includes(tipo);
-    const varPct  = cierre > 0
+    // Cuando no hay precio live, mostrar cierre en la columna y 0% de variación
+    const priceDisplay = live ? price : cierre;
+    const varPct  = live && cierre > 0
       ? (isShortCall ? cierre / price - 1 : price / cierre - 1)
       : 0;
     const cat     = meta?.categoria || '';
@@ -1176,7 +1178,7 @@ function renderFondo(fundId) {
         <td class="denom-cell">${meta?.denom || h.ticker}</td>
         <td class="num">${fNum(h.cantidad)}</td>
         <td class="num">${f2(cierre)}</td>
-        <td class="num">${f2(price)} ${badge}</td>
+        <td class="num">${f2(priceDisplay)} ${badge}</td>
         <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
         <td class="num">${fARS(montoTabla)}</td>
         <td class="num" style="color:#9A9AA0">${pn > 0 ? (montoDisplay / pn * 100).toFixed(2) + '%' : '—'}</td>
@@ -1606,7 +1608,7 @@ async function parsePDF(arrayBuffer) {
     if (t.startsWith('Total Inversiones') ||
         (t.startsWith('Total') && /\d{9,}/.test(t.replace(/\./g, '').replace(/,/g, ''))) ||
         (!isCicloNova && (t.startsWith('(1) Sobre') || t.startsWith('MONEDAS') || t.includes('Todos los importes'))) ||
-        (isCicloNova && (t === 'Disponibilidades' || /^Clase (A|B|Ley)$/.test(t) || t.startsWith('La Duration')))) {
+        (isCicloNova && (t === 'Disponibilidades' || /^Clase (A|B|Ley)$/.test(t) || t.startsWith('La Duration') || /Aperturas.*Cauciones/i.test(t)))) {
       totIdx = i; break;
     }
   }
