@@ -1050,7 +1050,7 @@ function calcMontosCartera(fundId) {
     }
     // montoDisplay: ajuste nocional, positivo → para % Patrim y breakdowns
     // montoTabla: precio × cantidad simple, negativo para short calls → para columna Monto y totalInv
-    const montoTabla = isShortCall ? -Math.abs(i.monto) : montoDisplay;
+    const montoTabla = isShortCall ? -Math.abs(i.monto) : i.monto;  // monto crudo, sin ajuste nocional
     return { ...i, montoDisplay, montoTabla };
   });
 }
