@@ -543,10 +543,10 @@ function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canj
       // HD: data912 devuelve precio directo en USD (hard dollar)
       if (tipo.includes('HD'))
         return { price: priceARS, live };
-      // Sin precio live: cierre del PDF ya está en USD → usar base directamente
+      // Sin precio live: cierre del PDF ya está en USD → usar base directamente (no dividir por MEP)
       if (!live) return { price: base, live: false };
       // Con precio live (data912 en ARS): convertir a USD vía MEP
-      return { price: fxNow > 0 ? priceARS / fxNow : h.cierre, live: false };
+      return { price: fxNow > 0 ? priceARS / fxNow : base, live: fxNow > 0 };
     }
     return { price: priceARS, live };
   }
