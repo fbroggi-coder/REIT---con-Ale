@@ -1692,6 +1692,41 @@ async function parsePDF(arrayBuffer) {
     console.log('[PDF] Holding:', ticker, '| cierre:', cierre, '| cant:', cantidad);
   }
 
+  // ── Cauciones / Aperturas (solo CICLO_NOVA) ──────────────────────────
+  if (isCicloNovaPDF) {
+    const caucionSecs = [
+      { pat: /Aperturas.*Cauciones.*[Dd][oó]lares/i, sufijo: '' },
+      { pat: /Aperturas.*Cauciones.*Pesos/i,          sufijo: '_ARS' },
+    ];
+    const caucionCount = {};
+    for (const { pat, sufijo } of caucionSecs) {
+      const secIdx = lines.findIndex(l => pat.test(l.text));
+      if (secIdx < 0) continue;
+      console.log('[PDF] Sección cauciones', sufijo || 'USD', 'en línea:', secIdx);
+      for (let i = secIdx + 1; i < Math.min(secIdx + 60, lines.length); i++) {
+        const lt = lines[i].text.trim();
+        if (!lt) continue;
+        // Parar en próxima sección
+        if (/^(Aperturas|Disponibilidades|Total\s|La Duration|Clase\s)/i.test(lt) &&
+            !/^(APERTURA|CAUCION|PASE)/i.test(lt)) break;
+        if (!/^(APERTURA|CAUCION|PASE)/i.test(lt)) continue;
+        const nums = [...lt.matchAll(numPat)].map(m => parseArNum(m[0])).filter(n => n > 0);
+        if (nums.length < 2) continue;
+        // Columnas: Tipo Vencimiento Concertación Plazo Tasa Total %
+        // nums[0] = Tasa (TNA), nums[1] = Total (valor en moneda de la sección)
+        const total = nums[1];
+        if (total <= 0) continue;
+        const base = 'APERTURA' + sufijo;
+        const cnt = caucionCount[base] = (caucionCount[base] || 0) + 1;
+        let ticker = cnt === 1 ? base : `${base}_${cnt}`;
+        while (usedTickers.has(ticker)) ticker = `${base}_${usedTickers.size + 1}`;
+        usedTickers.add(ticker);
+        res.holdings.push({ ticker, cierre: total, cantidad: 1 });
+        console.log('[PDF] Caución:', ticker, '| total:', total, '| tasa:', nums[0], '%');
+      }
+    }
+  }
+
   console.log('[PDF] Total:', res.holdings.length, 'instrumentos');
   return res;
 }
@@ -1865,6 +1900,12 @@ function autoSuggest(ticker, denom) {
   // Options (covered call / compra call / venta call)
   if (/^.*P\d+[A-Z]\d+$/.test(t) || d.includes('OPCION') || d.includes('OPTION'))
     return { fuente: 'hold', moneda: 'USD', lamina: 1, tipo: 'Covered Call' };
+  // Cauciones / Aperturas
+  if (/^APERTURA(_ARS)?(_\d+)?$/.test(t) || t === 'CAUCION' || t === 'PASE') {
+    if (t.includes('_ARS'))
+      return { fuente: 'devengamiento ARS', moneda: 'ARS', lamina: 1, tipo: 'Caución ARS' };
+    return { fuente: 'calculo MM usd', moneda: 'USD', lamina: 1, tipo: 'Caución USD' };
+  }
   return { fuente: 'hold', moneda: 'USD', lamina: 1, tipo: 'Equity USA' };
 }
 
