@@ -543,8 +543,10 @@ function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canj
       // HD: data912 devuelve precio directo en USD (hard dollar)
       if (tipo.includes('HD'))
         return { price: priceARS, live };
-      // DL / ARS: precio en ARS → convertir a USD vía MEP
-      return { price: fxNow > 0 ? priceARS / fxNow : h.cierre, live: live && fxNow > 0 };
+      // Sin precio live: cierre del PDF ya está en USD → usar base directamente
+      if (!live) return { price: base, live: false };
+      // Con precio live (data912 en ARS): convertir a USD vía MEP
+      return { price: fxNow > 0 ? priceARS / fxNow : h.cierre, live: false };
     }
     return { price: priceARS, live };
   }
@@ -1032,13 +1034,16 @@ function calcMontosCartera(fundId) {
 
   const totalNotional = items.reduce((s, i) => s + i.notional, 0);
   const mmUsdItems    = items.filter(i => i.tipo === 'Money Market USD');
-  const mmUsdAdj      = mmUsdItems.length > 0 ? totalNotional / mmUsdItems.length : 0;
+  // Cap the adjustment so no MM USD item goes negative
+  const totalMmUsd = mmUsdItems.reduce((s, i) => s + i.monto, 0);
+  const effNotional = Math.min(totalNotional, totalMmUsd);
+  const mmUsdAdj    = mmUsdItems.length > 0 ? effNotional / mmUsdItems.length : 0;
 
   return items.map(i => {
     const isShortCall = ['Covered Call', 'Venta Call'].includes(i.tipo);
     let montoDisplay = i.monto;
     if (i.isOpt)                           montoDisplay = i.monto + i.notional;
-    else if (i.tipo === 'Money Market USD') montoDisplay = i.monto - mmUsdAdj;
+    else if (i.tipo === 'Money Market USD') montoDisplay = Math.max(0, i.monto - mmUsdAdj);
     // montoDisplay: ajuste nocional, positivo → para % Patrim y breakdowns
     // montoTabla: precio × cantidad simple, negativo para short calls → para columna Monto y totalInv
     const montoTabla = isShortCall ? -Math.abs(i.monto) : montoDisplay;
