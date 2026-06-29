@@ -1872,6 +1872,7 @@ function showActivosCMS(fundId, nuevos, denomMap) {
   _cmsData = { fundId, nuevos, denomMap };
 
   const TIPO_LISTA = [
+    'Caución ARS','Caución USD',
     'Commodities','Compra Call','Covered Call','Equity Argentina','Equity USA',
     'Futuro de Dólar',
     'Money Market ARS','Money Market USD','ON DL','ON HD',
@@ -1882,7 +1883,10 @@ function showActivosCMS(fundId, nuevos, denomMap) {
     'Commodities','Compra Call','Covered Call','Equity','Futuro de Dólar','Liquidez',
     'Renta Fija','Short Equity','Short Renta Fija','Venta Call',
   ];
-  const FUENTE_LISTA = Object.keys(FUENTE_KIND);
+  const isUsdFund = FUNDS_CONFIG[fundId]?.moneda === 'USD';
+  const FUENTES_EXCLUIR_USD = ['calculo devengamiento', 'devengamiento ARS'];
+  const FUENTE_LISTA = Object.keys(FUENTE_KIND)
+    .filter(f => !isUsdFund || !FUENTES_EXCLUIR_USD.includes(f));
 
   const tableRows = nuevos.map((h, i) => {
     const denom    = denomMap[h.ticker] || h.ticker;
@@ -2106,9 +2110,11 @@ async function abrirEditarActivo(fundId, ticker) {
     a = arr[0] || {};
   } catch(e) {}
 
-  const TIPO_LISTA_ED = ['Commodities', 'Compra Call', 'Covered Call', 'Equity Argentina', 'Equity USA', 'Futuro de Dólar', 'Money Market ARS', 'Money Market USD', 'ON DL', 'ON HD', 'Pagare ARS', 'Pagare USD', 'Short Equity', 'Short Renta Fija', 'Soberano DL', 'Soberano HD', 'Soberanos ARS', 'Venta Call'];
+  const TIPO_LISTA_ED = ['Caución ARS', 'Caución USD', 'Commodities', 'Compra Call', 'Covered Call', 'Equity Argentina', 'Equity USA', 'Futuro de Dólar', 'Money Market ARS', 'Money Market USD', 'ON DL', 'ON HD', 'Pagare ARS', 'Pagare USD', 'Short Equity', 'Short Renta Fija', 'Soberano DL', 'Soberano HD', 'Soberanos ARS', 'Venta Call'];
   const CAT_LISTA_ED  = ['Commodities', 'Compra Call', 'Covered Call', 'Equity', 'Futuro de Dólar', 'Liquidez', 'Renta Fija', 'Short Equity', 'Short Renta Fija', 'Venta Call'];
-  const FUENTE_LISTA_ED = Object.keys(FUENTE_KIND);
+  const isUsdFundED = FUNDS_CONFIG[fundId]?.moneda === 'USD';
+  const FUENTE_LISTA_ED = Object.keys(FUENTE_KIND)
+    .filter(f => !isUsdFundED || !['calculo devengamiento', 'devengamiento ARS'].includes(f));
 
   const tipoOpts = TIPO_LISTA_ED.map(t => `<option value="${t}" ${t===a.tipo_activo?'selected':''}>${t}</option>`).join('');
   const catOpts  = CAT_LISTA_ED.map(c => `<option value="${c}" ${c===a.categoria?'selected':''}>${c}</option>`).join('');
