@@ -2271,4 +2271,18 @@ async function guardarEditarActivo(fundId, ticker) {
     precio_inicial: parseFloat(document.getElementById('ed-pi')?.value) || null,
   };
   try {
-    const r = await fetch(`${SB_URL}/${tabla}?ticker=eq.${encodeURICompon
+    const r = await fetch(`${SB_URL}/${tabla}?ticker=eq.${encodeURIComponnent(ticker)}`, {
+      method: 'PATCH',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify(updates),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    closeModal();
+    cargarActivosTabla(fundId);
+  } catch(e) {
+    alert('Error guardando: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>
