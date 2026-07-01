@@ -1986,6 +1986,7 @@ function showActivosCMS(fundId, nuevos, denomMap) {
         <td style="padding:8px 4px"><input class="cms-input" id="c-tas-${i}" value="" placeholder="TNA%" style="width:66px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
         <td style="padding:8px 4px"><input class="cms-input" id="c-lam-${i}" value="${s.lamina}" placeholder="Lámina" style="width:70px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
         <td style="padding:8px 4px"><input class="cms-input" id="c-bas-${i}" value="" placeholder="Base" style="width:90px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
+        <td style="padding:8px 4px"><input class="cms-input" id="c-pi-${i}" value="" placeholder="0.00" style="width:72px;font-family:'JetBrains Mono',monospace;font-size:11px"></td>
       </tr>\``;
   }).join('');
 
@@ -2005,7 +2006,7 @@ function showActivosCMS(fundId, nuevos, denomMap) {
             <thead>
               <tr>
                 <th>Ticker</th><th>Nombre</th><th>Tipo</th><th>Categoría</th><th>Moneda</th>
-                <th>Fuente precio ★</th><th>Live symbol</th><th>TNA %</th><th>Lámina ★</th><th>Base</th>
+                <th>Fuente precio ★</th><th>Live symbol</th><th>TNA %</th><th>Lámina ★</th><th>Base</th><th>P. inicial</th>
               </tr>
             </thead>
             <tbody>${tableRows}</tbody>
@@ -2037,6 +2038,7 @@ async function guardarNuevosActivos() {
     tasa:          parseFloat(document.getElementById(`c-tas-${i}`)?.value) || null,
     lamina:        parseFloat(document.getElementById(`c-lam-${i}`)?.value) || 1,
     base:          document.getElementById(`c-bas-${i}`)?.value?.trim() || null,
+    precio_inicial: parseFloat(document.getElementById(`c-pi-${i}`)?.value) || null,
   }));
 
   showModal(`<div class="modal-box" style="max-width:340px;padding:40px;text-align:center">
@@ -2047,7 +2049,7 @@ async function guardarNuevosActivos() {
   try {
     const resp = await fetch(`${SB_URL}/${tabla}`, {
       method: 'POST',
-      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal,resolution=ignore-duplicates' },
       body: JSON.stringify(rows),
     });
     if (!resp.ok) throw new Error('Error insertando activos: ' + resp.status + ' ' + await resp.text());
@@ -2274,7 +2276,7 @@ async function guardarEditarActivo(fundId, ticker) {
     precio_inicial: parseFloat(document.getElementById('ed-pi')?.value) || null,
   };
   try {
-    const r = await fetch(`${SB_URL}/${tabla}?ticker=eq.${encodeURIComponnent(ticker)}`, {
+    const r = await fetch(`${SB_URL}/${tabla}?ticker=eq.${encodeURIComponent(ticker)}`, {
       method: 'PATCH',
       headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
       body: JSON.stringify(updates),
