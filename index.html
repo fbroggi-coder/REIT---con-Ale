@@ -630,10 +630,63 @@ function calcPrecio(h, meta, fondoMoneda, fxLive, fxAyer, marketMap, usMap, canj
 // CÁLCULO DE NAV
 // ═══════════════════════════════════════════════════════════════════
 
+// ── Cortes de cupón ────────────────────────────────────────────────
+// Devuelve holdings reales + entradas sintéticas para los cortes de hoy.
+// El cierre de cada sintético ya está en la moneda del fondo (conversión MEP live).
+function getHoldingsConCortes(fundId) {
+  const holdings = state.holdings[fundId] || [];
+  const cortes   = state.cortesCupon[fundId] || [];
+  const moneda   = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
+  const mep      = state.fxLive || state.fxAyer || 0;
+
+  const synth = cortes.map(c => {
+    let cierre;
+    if (c.moneda === moneda)                              cierre = c.monto;
+    else if (moneda === 'ARS' && c.moneda === 'USD')     cierre = mep > 0 ? c.monto * mep : c.monto;
+    else if (moneda === 'USD' && c.moneda === 'ARS')     cierre = mep > 0 ? c.monto / mep : c.monto;
+    else                                                  cierre = c.monto;
+    return { ticker: `CUPON_${c.id}`, cantidad: 1, cierre, _esCupon: true, _corte: c };
+  });
+  return [...holdings, ...synth];
+}
+
+// Inyecta meta sintética para los cortes activos del fondo en state.meta[fundId].
+function injectCorteMeta(fundId) {
+  const cortes = state.cortesCupon[fundId] || [];
+  if (!state.meta[fundId]) state.meta[fundId] = {};
+  for (const c of cortes) {
+    state.meta[fundId][`CUPON_${c.id}`] = {
+      denom: c.descripcion || 'Corte de cupón',
+      tipo:  'Corte de Cupón',
+      moneda: FUNDS_CONFIG[fundId]?.moneda || 'ARS',
+      fuente: 'hold', kind: 'hold', liveSymbol: null,
+      tasa: null, lamina: 1, precioInicial: null,
+    };
+  }
+}
+
+// Carga cortes_cupon de hoy desde Supabase.
+async function cargarCortesCupon() {
+  const hoy = new Date().toISOString().split('T')[0];
+  try {
+    const rows = await sbGet(`/cortes_cupon?fecha=eq.${hoy}&select=id,fund_id,fecha,monto,moneda,descripcion&order=id.asc`);
+    state.cortesCupon = {};
+    for (const r of rows) {
+      if (!state.cortesCupon[r.fund_id]) state.cortesCupon[r.fund_id] = [];
+      state.cortesCupon[r.fund_id].push(r);
+    }
+  } catch(e) {
+    console.warn('[iEB] cortes_cupon no disponible (¿tabla creada?):', e.message);
+    state.cortesCupon = {};
+  }
+  // Inyectar meta para todos los fondos
+  Object.keys(FUNDS_CONFIG || {}).forEach(fid => injectCorteMeta(fid));
+}
+
 function calcNAV(fundId) {
   const cfg      = FUNDS_CONFIG[fundId];
   if (!cfg) return { totalInv: 0, ajusteSum: 0, pnBruto: 0, honorario: 0, pn: 0, navLive: 0, rend: 0 };
-  const holdings  = state.holdings[fundId] || [];
+  const holdings  = getHoldingsConCortes(fundId);
   const meta      = state.meta[fundId] || {};
   const moneda    = cfg.moneda || 'ARS';
   let totalInv    = 0;
@@ -895,6 +948,7 @@ const state = {
   updatingPrices:  false, // true mientras se está actualizando
   breakdown:       null,  // null | 'moneda' | 'tipo' | 'cat'
   yahooMap:        {},    // { symbol: priceUSD } desde Yahoo Finance
+  cortesCupon:     {},    // { [fundId]: [{ id, fund_id, fecha, monto, moneda, descripcion }] }
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1022,7 +1076,7 @@ const OPTION_TIPOS = ['Compra Call', 'Venta Call', 'Covered Call'];
 
 function calcMontosCartera(fundId) {
   const cfg       = FUNDS_CONFIG[fundId];
-  const holdings  = state.holdings[fundId] || [];
+  const holdings  = getHoldingsConCortes(fundId);
   const fondoMeta = state.meta[fundId]    || {};
   const moneda    = cfg?.moneda || 'ARS';
   const applyAdj  = fundId === 'CICLO_NOVA';
@@ -1150,8 +1204,9 @@ function renderBreakdownPanel(fundId) {
 function renderFondo(fundId) {
   const cfg = FUNDS_CONFIG[fundId];
   if (!cfg) return `<div class="center-msg"><span>Fondo no encontrado</span></div>`;
+  injectCorteMeta(fundId);  // asegurar meta sintética actualizada
   const { navLive, rend, pn, totalInv, ajusteSum, honorario } = calcNAV(fundId);
-  const holdings  = state.holdings[fundId] || [];
+  const holdings  = getHoldingsConCortes(fundId);
   const fondoMeta = state.meta[fundId] || {};
   const moneda    = cfg.moneda || 'ARS';
   const pos = rend > 1e-5, neg = rend < -1e-5;
@@ -1165,6 +1220,32 @@ function renderFondo(fundId) {
   const montosTablaMap = Object.fromEntries(montosAjust.map(i => [i.ticker, i.montoTabla]));
 
   const rows = holdings.map(h => {
+    // ── Fila especial para Cortes de Cupón ──────────────────────────
+    if (h._esCupon) {
+      const c = h._corte;
+      const montoFondo = h.cierre; // ya convertido a moneda del fondo
+      const pct = pn > 0 ? (montoFondo / pn * 100).toFixed(2) + '%' : '—';
+      const montoOrig = c.moneda === moneda
+        ? ''
+        : `<span style="font-size:10px;color:#5A5A60;margin-left:4px">(${c.moneda === 'USD' ? 'USD ' : 'ARS '}${fNum(c.monto)})</span>`;
+      return `
+      <tr class="holding-row" data-ticker="cupon_${c.id}" data-tipo="Corte de Cupón" data-cat="">
+        <td><span class="ticker-chip" style="background:rgba(251,191,36,0.15);color:#F59E0B;border-color:rgba(251,191,36,0.3)">✂</span></td>
+        <td class="denom-cell">${c.descripcion || 'Corte de cupón'}${montoOrig}</td>
+        <td class="num" style="color:#9A9AA0">—</td>
+        <td class="num" style="color:#9A9AA0">—</td>
+        <td class="num" style="color:#9A9AA0">—</td>
+        <td class="num" style="color:#9A9AA0">—</td>
+        <td class="num" style="color:#9A9AA0">—</td>
+        <td class="num" style="color:#F59E0B">${fARS(montoFondo)}</td>
+        <td class="num" style="color:#9A9AA0">${pct}</td>
+        <td>
+          <button onclick="eliminarCorteCupon(${c.id},'${fundId}')"
+            style="background:rgba(211,58,63,0.12);border:1px solid rgba(211,58,63,0.3);color:#D33A3F;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">✕</button>
+        </td>
+      </tr>`;
+    }
+
     const meta   = fondoMeta[h.ticker];
     const instrMoneda = meta?.moneda || 'ARS';
     const { price, live } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
@@ -1279,6 +1360,10 @@ function renderFondo(fundId) {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="${state.updatingPrices ? 'animation:spin 1s linear infinite' : ''}"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           ${state.updatingPrices ? 'Actualizando…' : 'Actualizar precios'}
           ${state.lastPriceUpdate ? `<span style="font-size:10px;opacity:0.5;margin-left:4px">${state.lastPriceUpdate.toLocaleTimeString('es-AR', {hour:'2-digit',minute:'2-digit'})}</span>` : ''}
+        </button>
+        <button onclick="abrirCorteCupon('${fundId}')" class="upload-btn" style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);color:#F59E0B">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Corte de cupón
         </button>
         <label for="pdf-input" class="upload-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
@@ -1407,6 +1492,9 @@ async function init() {
     state.fxAyer    = fxAyer.mep;
     state.fxAyerCCL = fxAyer.ccl;
     state.loading   = false;
+
+    // Cargar cortes del día (no bloquea el render inicial)
+    await cargarCortesCupon();
     render();
 
     const live = await fetchLivePrecios();
@@ -2077,6 +2165,150 @@ async function guardarNuevosActivos() {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// CORTE DE CUPÓN
+// ══════════════════════════════════════════════════════════════════════
+
+function abrirCorteCupon(fundId) {
+  const cfg      = FUNDS_CONFIG[fundId] || {};
+  const fondoMoneda = cfg.moneda || 'ARS';
+  const mep      = state.fxLive || state.fxAyer || 0;
+
+  showModal(`
+    <div class="modal-box" style="max-width:420px">
+      <div class="modal-header">
+        <div>
+          <div style="font-size:11px;color:#F59E0B;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Corte de cupón</div>
+          <div style="font-size:18px;font-weight:800">${cfg.nombre || fundId}</div>
+        </div>
+        <button onclick="closeModal()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:26px;line-height:1;padding:0">×</button>
+      </div>
+      <div class="modal-body">
+        <p style="color:#9A9AA0;font-size:13px;margin-bottom:18px">
+          El monto queda registrado solo por hoy. Cualquiera que entre a la web ese día lo va a ver reflejado en el PN.
+        </p>
+
+        <div style="display:grid;grid-template-columns:1fr auto;gap:10px;margin-bottom:14px">
+          <div>
+            <label style="font-size:11px;color:#9A9AA0;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:6px">Monto</label>
+            <input id="cc-monto" type="number" step="any" placeholder="0.00"
+              oninput="previewCorteCupon('${fundId}')"
+              style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1A1A20;border:1px solid rgba(255,255,255,0.12);border-radius:8px;color:#E5E5E7;font-size:15px;font-family:'JetBrains Mono',monospace;outline:none">
+          </div>
+          <div>
+            <label style="font-size:11px;color:#9A9AA0;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:6px">Moneda</label>
+            <select id="cc-moneda" onchange="previewCorteCupon('${fundId}')"
+              style="padding:10px 12px;background:#1A1A20;border:1px solid rgba(255,255,255,0.12);border-radius:8px;color:#E5E5E7;font-size:14px;font-family:inherit;outline:none;cursor:pointer;height:42px">
+              <option value="ARS" ${fondoMoneda === 'ARS' ? 'selected' : ''}>ARS</option>
+              <option value="USD" ${fondoMoneda === 'USD' ? 'selected' : ''}>USD</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="margin-bottom:14px">
+          <label style="font-size:11px;color:#9A9AA0;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:6px">Descripción (opcional)</label>
+          <input id="cc-desc" type="text" placeholder="Ej: Cupón BOPREAL julio"
+            style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1A1A20;border:1px solid rgba(255,255,255,0.12);border-radius:8px;color:#E5E5E7;font-size:14px;font-family:inherit;outline:none">
+        </div>
+
+        <div id="cc-preview" style="padding:12px 14px;background:rgba(251,191,36,0.07);border:1px solid rgba(251,191,36,0.2);border-radius:8px;font-size:13px;color:#F59E0B;min-height:40px">
+          Ingresá un monto para ver el impacto en el PN.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="closeModal()">Cancelar</button>
+        <button class="btn-primary" style="background:#F59E0B;color:#000" onclick="guardarCorteCupon('${fundId}')">✂ Guardar corte</button>
+      </div>
+    </div>`);
+}
+
+function previewCorteCupon(fundId) {
+  const montoRaw   = parseFloat(document.getElementById('cc-monto')?.value);
+  const moneda     = document.getElementById('cc-moneda')?.value;
+  const preview    = document.getElementById('cc-preview');
+  if (!preview) return;
+  if (!montoRaw || isNaN(montoRaw) || montoRaw <= 0) {
+    preview.textContent = 'Ingresá un monto para ver el impacto en el PN.';
+    return;
+  }
+
+  const fondoMoneda = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
+  const mep         = state.fxLive || state.fxAyer || 0;
+  let montoFondo, detalle;
+
+  if (moneda === fondoMoneda) {
+    montoFondo = montoRaw;
+    detalle    = '';
+  } else if (fondoMoneda === 'ARS' && moneda === 'USD') {
+    montoFondo = mep > 0 ? montoRaw * mep : montoRaw;
+    detalle    = mep > 0 ? ` (USD ${fNum(montoRaw)} × MEP $${fNum(mep)})` : ' (MEP no disponible)';
+  } else if (fondoMoneda === 'USD' && moneda === 'ARS') {
+    montoFondo = mep > 0 ? montoRaw / mep : montoRaw;
+    detalle    = mep > 0 ? ` (ARS ${fNum(montoRaw)} ÷ MEP $${fNum(mep)})` : ' (MEP no disponible)';
+  }
+
+  const { pn } = calcNAV(fundId);
+  const impacto = pn > 0 ? ` → ${(montoFondo / pn * 100).toFixed(3)}% del PN` : '';
+  preview.innerHTML = `<strong>+${fARS(montoFondo)} ${fondoMoneda}</strong>${detalle}${impacto}`;
+}
+
+async function guardarCorteCupon(fundId) {
+  const monto = parseFloat(document.getElementById('cc-monto')?.value);
+  const moneda = document.getElementById('cc-moneda')?.value;
+  const descripcion = document.getElementById('cc-desc')?.value?.trim() || null;
+
+  if (!monto || isNaN(monto) || monto <= 0) {
+    alert('Ingresá un monto válido.');
+    return;
+  }
+
+  const fecha = new Date().toISOString().split('T')[0];
+
+  showModal(`<div class="modal-box" style="max-width:340px;padding:40px;text-align:center">
+    <div class="spinner" style="margin:0 auto 16px"></div>
+    <div style="color:#9A9AA0;font-size:14px;font-weight:600">Guardando corte…</div>
+  </div>`);
+
+  try {
+    const resp = await fetch(`${SB_URL}/cortes_cupon`, {
+      method: 'POST',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+      body: JSON.stringify({ fund_id: fundId, fecha, monto, moneda, descripcion }),
+    });
+    if (!resp.ok) throw new Error('Error guardando corte: ' + resp.status + ' ' + await resp.text());
+    const [row] = await resp.json();
+    // Agregar al state local
+    if (!state.cortesCupon[fundId]) state.cortesCupon[fundId] = [];
+    state.cortesCupon[fundId].push(row);
+    injectCorteMeta(fundId);
+    closeModal();
+    render();
+  } catch(e) {
+    console.error('[iEB] guardarCorteCupon:', e);    showModal(`<div class="modal-box" style="max-width:400px;padding:32px">
+      <div style="color:#D33A3F;font-size:15px;font-weight:700;margin-bottom:8px">Error al guardar</div>
+      <div style="color:#9A9AA0;font-size:13px;margin-bottom:20px">${e.message}</div>
+      <button class="btn-secondary" onclick="closeModal()">Cerrar</button>
+    </div>`);
+  }
+}
+
+async function eliminarCorteCupon(id, fundId) {
+  if (!confirm('¿Eliminar este corte de cupón?')) return;
+  try {
+    const resp = await fetch(`${SB_URL}/cortes_cupon?id=eq.${id}`, {
+      method: 'DELETE',
+      headers: SB_HDR,
+    });
+    if (!resp.ok && resp.status !== 404) throw new Error('Error eliminando: ' + resp.status);
+    if (state.cortesCupon[fundId]) {
+      state.cortesCupon[fundId] = state.cortesCupon[fundId].filter(c => c.id !== id);
+    }
+    if (state.meta[fundId]) delete state.meta[fundId][`CUPON_${id}`];
+    render();
+  } catch(e) {
+    alert('Error al eliminar: ' + e.message);
+  }
+}
 async function handlePDFUpload(file) {
   if (!file) return;
   document.getElementById('pdf-input').value = '';
