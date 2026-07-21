@@ -1665,8 +1665,17 @@ function generarOnePage(fundId) {
   }).join('');
 
   // Detail columns
-  const third  = Math.ceil(cats.length / 3);
-  const colData = [cats.slice(0, third), cats.slice(third, third * 2), cats.slice(third * 2)];
+  // Balance columns by item count, not category count
+  const totalH = cats.reduce((s, [, d]) => s + d.items.length + 2, 0);
+  const target = totalH / 3;
+  const colData = [[], [], []];
+  let ci = 0, ch = 0;
+  for (const entry of cats) {
+    const h = entry[1].items.length + 2;
+    if (ci < 2 && ch + h * 0.5 > target) { ci++; ch = 0; }
+    colData[ci].push(entry);
+    ch += h;
+  }
 
   const renderCol = (col) => col.map(([cat, data]) => {
     const catPct = pn > 0 ? data.total / pn * 100 : 0;
