@@ -895,6 +895,7 @@ const state = {
   updatingPrices:  false, // true mientras se está actualizando
   breakdown:       null,  // null | 'moneda' | 'tipo' | 'cat'
   yahooMap:        {},    // { symbol: priceUSD } desde Yahoo Finance
+  coveredCalls:    {},    // { [fundId]: [{id, ticker_stock, ticker_call, nombre}] }
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1038,7 +1039,33 @@ function calcMontosCartera(fundId) {
     return { ticker: h.ticker, meta, tipo, monto, notional, isOpt };
   });
 
-  if (!applyAdj) return items.map(i => ({ ...i, montoDisplay: i.monto }));
+  // ── Covered Call merge helper ─────────────────────────────────
+  const _ccList    = state.coveredCalls[fundId] || [];
+  const _ccByStock = new Map(_ccList.map(cc => [cc.ticker_stock, cc]));
+  const _ccCallSet = new Set(_ccList.map(cc => cc.ticker_call));
+
+  function mergeCoveredCalls(resultItems) {
+    if (_ccList.length === 0) return resultItems;
+    const merged = [];
+    for (const item of resultItems) {
+      if (_ccCallSet.has(item.ticker)) continue;
+      if (_ccByStock.has(item.ticker)) {
+        const cc       = _ccByStock.get(item.ticker);
+        const callItem = resultItems.find(i => i.ticker === cc.ticker_call);
+        if (callItem) {
+          const netMonto = item.monto - Math.abs(callItem.monto);
+          merged.push({ ...item, tipo: 'Covered Call', monto: netMonto,
+            montoDisplay: netMonto, montoTabla: netMonto,
+            _isCoveredCall: true, _cc: cc });
+          continue;
+        }
+      }
+      merged.push(item);
+    }
+    return merged;
+  }
+
+  if (!applyAdj) return mergeCoveredCalls(items.map(i => ({ ...i, montoDisplay: i.monto, montoTabla: i.monto })));
 
   const totalNotional = items.reduce((s, i) => s + i.notional, 0);
   // Distribuir nocional proporcionalmente entre MM USD y Caución USD
@@ -1046,21 +1073,19 @@ function calcMontosCartera(fundId) {
   const liqItems     = items.filter(i => LIQUIDEZ_USD.includes(i.tipo));
   const totalLiqUsd  = liqItems.reduce((s, i) => s + i.monto, 0);
 
-  return items.map(i => {
+  const base = items.map(i => {
     const isShortCall = ['Covered Call', 'Venta Call'].includes(i.tipo);
     let montoDisplay = i.monto;
     if (i.isOpt) {
       montoDisplay = i.monto + i.notional;
     } else if (LIQUIDEZ_USD.includes(i.tipo)) {
-      // Cada item absorbe su parte proporcional del nocional
       const share = totalLiqUsd > 0 ? i.monto / totalLiqUsd : 0;
       montoDisplay = Math.max(0, i.monto - totalNotional * share);
     }
-    // montoDisplay: ajuste nocional, positivo → para % Patrim y breakdowns
-    // montoTabla: precio × cantidad simple, negativo para short calls → para columna Monto y totalInv
-    const montoTabla = isShortCall ? -Math.abs(i.monto) : i.monto;  // monto crudo, sin ajuste nocional
+    const montoTabla = isShortCall ? -Math.abs(i.monto) : i.monto;
     return { ...i, montoDisplay, montoTabla };
   });
+  return mergeCoveredCalls(base);
 }
 
 // ── BREAKDOWN ────────────────────────────────────────────────────────
@@ -1164,7 +1189,15 @@ function renderFondo(fundId) {
   const montosMap      = Object.fromEntries(montosAjust.map(i => [i.ticker, i.montoDisplay]));
   const montosTablaMap = Object.fromEntries(montosAjust.map(i => [i.ticker, i.montoTabla]));
 
+  // Covered Call lookups
+  const ccList    = state.coveredCalls[fundId] || [];
+  const ccByStock = new Map(ccList.map(cc => [cc.ticker_stock, cc]));
+  const ccCallSet = new Set(ccList.map(cc => cc.ticker_call));
+
   const rows = holdings.map(h => {
+    // ── Fila oculta: call dentro de un CC pair ───────────────────
+    if (ccCallSet.has(h.ticker)) return '';
+
     const meta   = fondoMeta[h.ticker];
     const instrMoneda = meta?.moneda || 'ARS';
     const { price, live } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
@@ -1173,7 +1206,6 @@ function renderFondo(fundId) {
     const monto   = h.cantidad * (price / lamina);
     const tipo    = meta?.tipo   || 'Otros';
     const isShortCall = ['Covered Call', 'Venta Call'].includes(tipo);
-    // Cuando no hay precio live, mostrar cierre en la columna y 0% de variación
     const priceDisplay = live ? price : cierre;
     const varPct  = live && cierre > 0
       ? (isShortCall ? cierre / price - 1 : price / cierre - 1)
@@ -1188,13 +1220,50 @@ function renderFondo(fundId) {
       : varHist > 0               ? '#2E9E2A' : '#D33A3F';
     const montoDisplay = montosMap[h.ticker]     ?? monto;
     const montoTabla   = montosTablaMap[h.ticker] ?? monto;
-    const dot     = dotColor(tipo);
     const varColor = Math.abs(varPct) < 1e-9 ? '#9A9AA0' : (varPct > 0 ? '#2E9E2A' : '#D33A3F');
     const badge   = live
       ? `<span class="badge badge-live">LIVE</span>`
       : `<span class="badge badge-hold">CIERRE</span>`;
     const monedaBg    = instrMoneda === 'USD' ? '#ECFCCB' : '#EDE9FE';
     const monedaColor = instrMoneda === 'USD' ? '#3F6212' : '#5B21B6';
+
+    // ── Fila combinada: stock dentro de un CC pair ───────────────
+    if (ccByStock.has(h.ticker)) {
+      const cc      = ccByStock.get(h.ticker);
+      const h_call  = holdings.find(hh => hh.ticker === cc.ticker_call);
+      const m_call  = fondoMeta[cc.ticker_call];
+      const ccNombre = cc.nombre || (h.ticker.split(' ')[0] + ' CC');
+      const ccCat    = cat || 'Covered Call';
+      // Precio y monto neto ya están en montosMap (post-merge en calcMontosCartera)
+      const netMontoTabla   = montoTabla;   // ya es neto: stock - call
+      const netMontoDisplay = montoDisplay; // idem
+      // Precio del call para mostrar en subtítulo
+      let callPriceStr = '';
+      if (h_call && m_call) {
+        const { price: cp } = calcPrecio(h_call, m_call, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
+        callPriceStr = f2(cp);
+      }
+      return `
+      <tr class="holding-row" data-ticker="${ccNombre.toLowerCase()}" data-tipo="Covered Call" data-cat="${ccCat}">
+        <td><span class="ticker-chip" style="background:rgba(99,102,241,0.15);border-color:rgba(99,102,241,0.3);color:#818CF8">${ccNombre}</span></td>
+        <td class="denom-cell">
+          ${meta?.denom || h.ticker}
+          <span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">✕ ${cc.ticker_call}${callPriceStr ? ' · call @ ' + callPriceStr : ''}</span>
+        </td>
+        <td class="num">${fNum(h.cantidad)}</td>
+        <td class="num">${f2(cierre)}</td>
+        <td class="num">${f2(priceDisplay)} ${badge}</td>
+        <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
+        <td class="num" style="color:${varHistColor}">${varHist !== null ? fPct(varHist) : '—'}</td>
+        <td class="num">${fARS(netMontoTabla)}</td>
+        <td class="num" style="color:#9A9AA0">${pn > 0 ? (netMontoDisplay / pn * 100).toFixed(2) + '%' : '—'}</td>
+        <td>
+          <button onclick="eliminarCoveredCall(${cc.id})"
+            title="Disolver Covered Call"
+            style="background:rgba(99,102,241,0.12);border:1px solid rgba(99,102,241,0.3);color:#818CF8;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">✕</button>
+        </td>
+      </tr>`;
+    }
 
     return `
       <tr class="holding-row" data-ticker="${h.ticker.toLowerCase()}" data-tipo="${tipo}" data-cat="${cat}">
@@ -1391,6 +1460,43 @@ function bindEvents() {
 // INIT
 // ═══════════════════════════════════════════════════════════════════
 
+async function cargarCoveredCalls() {
+  try {
+    const rows = await sbGet('/covered_calls?select=id,fund_id,ticker_stock,ticker_call,nombre&order=id.asc');
+    state.coveredCalls = {};
+    for (const r of rows) {
+      if (!state.coveredCalls[r.fund_id]) state.coveredCalls[r.fund_id] = [];
+      state.coveredCalls[r.fund_id].push(r);
+    }
+  } catch(e) {
+    console.warn('[iEB] covered_calls no disponible:', e.message);
+    state.coveredCalls = {};
+  }
+}
+
+async function guardarCoveredCall(fundId, tickerStock, tickerCall, nombre) {
+  const body = JSON.stringify({ fund_id: fundId, ticker_stock: tickerStock, ticker_call: tickerCall, nombre });
+  const r = await fetch(SB_URL + '/covered_calls', {
+    method: 'POST',
+    headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+    body,
+  });
+  const [saved] = await r.json();
+  if (!state.coveredCalls[fundId]) state.coveredCalls[fundId] = [];
+  state.coveredCalls[fundId].push(saved);
+  closeModal();
+  render();
+}
+
+async function eliminarCoveredCall(id) {
+  if (!confirm('¿Disolver este Covered Call? Los activos volverán a mostrarse por separado.')) return;
+  await fetch(SB_URL + '/covered_calls?id=eq.' + id, { method: 'DELETE', headers: SB_HDR });
+  for (const fid of Object.keys(state.coveredCalls)) {
+    state.coveredCalls[fid] = state.coveredCalls[fid].filter(cc => cc.id !== id);
+  }
+  render();
+}
+
 async function init() {
   render(); // pantalla de carga
 
@@ -1400,6 +1506,7 @@ async function init() {
       cargarMeta(),
       cargarHoldings(),
       cargarFxAyer(),
+      cargarCoveredCalls(),
     ]);
     FUNDS_CONFIG   = fundsConfig;
     state.meta     = meta;
@@ -1990,6 +2097,40 @@ function showActivosCMS(fundId, nuevos, denomMap) {
       </tr>\``;
   }).join('');
 
+  // ── Auto-detectar Covered Calls ────────────────────────────────
+  const existingCC = (state.coveredCalls[fundId] || []);
+  const existingCCKeys = new Set(existingCC.map(cc => cc.ticker_stock + '|' + cc.ticker_call));
+  const ccSugeridos = [];
+  for (const h of nuevos) {
+    const m = h.ticker.match(/^([A-Z]{3,6})(C|P)\d/);
+    if (!m) continue;
+    const underlying = m[1];
+    const stock = nuevos.find(s =>
+      s.ticker !== h.ticker &&
+      s.ticker.toUpperCase().startsWith(underlying) &&
+      !s.ticker.match(/[CP]\d{2}/) &&
+      Math.abs(s.cantidad - h.cantidad) < 1
+    );
+    if (stock && !existingCCKeys.has(stock.ticker + '|' + h.ticker)) {
+      ccSugeridos.push({ stock: stock.ticker, call: h.ticker, nombre: underlying + ' CC' });
+    }
+  }
+  const ccBanner = ccSugeridos.length > 0 ? `
+    <div style="margin-bottom:14px;padding:12px 16px;background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);border-radius:8px">
+      <div style="font-size:11px;font-weight:700;color:#818CF8;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Covered Call detectado</div>
+      ${ccSugeridos.map(p => `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <span class="ticker-chip" style="font-size:11px">${p.stock}</span>
+          <span style="color:#5A5A60">+</span>
+          <span class="ticker-chip" style="font-size:11px">${p.call}</span>
+          <span style="flex:1;font-size:11px;color:#9A9AA0">misma cantidad</span>
+          <button onclick="guardarCoveredCall('${fundId}','${p.stock}','${p.call}','${p.nombre}')"
+            style="padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.4);color:#818CF8">
+            Vincular →
+          </button>
+        </div>`).join('')}
+    </div>` : '';
+
   showModal(`
     <div class="modal-box modal-wide">
       <div class="modal-header">
@@ -2000,6 +2141,7 @@ function showActivosCMS(fundId, nuevos, denomMap) {
         <button onclick="saltarCMS()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:13px;font-weight:600">Saltar →</button>
       </div>
       <div class="modal-body">
+        ${ccBanner}
         <p style="color:#9A9AA0;font-size:13px;margin-bottom:16px">Completá los datos para calcular precios. Los campos <span style="color:#A6E635">fuente precio</span> y <span style="color:#A6E635">lámina</span> son los más importantes.</p>
         <div style="overflow-x:auto">
           <table class="cms-table">
@@ -2155,9 +2297,8 @@ async function cargarActivosTabla(fundId) {
         <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#9A9AA0">${a.fuente_precio || ''}</td>
         <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${a.lamina ?? ''}</td>
         <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${a.base || ''}</td>
-        <td style="white-space:nowrap;display:flex;gap:6px;padding:6px 8px">
+        <td>
           <button onclick="abrirEditarActivo('${fundId}','${a.ticker}')" style="background:rgba(166,230,53,0.1);border:1px solid rgba(166,230,53,0.25);color:#A6E635;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">Editar</button>
-          <button onclick="confirmarEliminarActivo('${fundId}','${a.ticker}')" style="background:rgba(211,58,63,0.1);border:1px solid rgba(211,58,63,0.25);color:#D33A3F;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">Eliminar</button>
         </td>
       </tr>`).join('');
 
@@ -2287,78 +2428,6 @@ async function guardarEditarActivo(fundId, ticker) {
     cargarActivosTabla(fundId);
   } catch(e) {
     alert('Error guardando: ' + e.message);
-  }
-}
-
-// ── Eliminar activo ────────────────────────────────────────────────────────
-
-function confirmarEliminarActivo(fundId, ticker) {
-  // Chequear si el ticker todavía está en la cartera actual
-  const enCartera = (state.holdings[fundId] || []).some(h => h.ticker === ticker);
-
-  if (enCartera) {
-    // Warning fuerte — el activo sigue en holdings
-    showModal(`
-      <div class="modal-box" style="max-width:400px;padding:32px">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" stroke-width="2.5" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          <div style="font-size:16px;font-weight:800;color:#F59E0B">Activo en cartera activa</div>
-        </div>
-        <p style="color:#E5E5E7;font-size:14px;margin-bottom:8px">
-          <strong>${ticker}</strong> todavía figura en la cartera actual de este fondo.
-        </p>
-        <p style="color:#9A9AA0;font-size:13px;margin-bottom:20px">
-          Si lo eliminás de la tabla de activos, la app no va a poder calcular su precio ni mostrarlo correctamente. ¿Seguro que querés continuar?
-        </p>
-        <div style="display:flex;gap:10px;justify-content:flex-end">
-          <button class="btn-secondary" onclick="closeModal()">Cancelar</button>
-          <button style="background:rgba(211,58,63,0.15);border:1px solid rgba(211,58,63,0.4);color:#D33A3F;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit"
-            onclick="eliminarActivo('${fundId}','${ticker}')">Eliminar igual</button>
-        </div>
-      </div>`);
-  } else {
-    // Confirmación simple
-    showModal(`
-      <div class="modal-box" style="max-width:380px;padding:32px">
-        <div style="font-size:16px;font-weight:800;margin-bottom:12px">¿Eliminar activo?</div>
-        <p style="color:#9A9AA0;font-size:14px;margin-bottom:20px">
-          Vas a eliminar <strong style="color:#E5E5E7">${ticker}</strong> de la tabla de activos. Esta acción no se puede deshacer.
-        </p>
-        <div style="display:flex;gap:10px;justify-content:flex-end">
-          <button class="btn-secondary" onclick="closeModal()">Cancelar</button>
-          <button style="background:rgba(211,58,63,0.15);border:1px solid rgba(211,58,63,0.4);color:#D33A3F;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit"
-            onclick="eliminarActivo('${fundId}','${ticker}')">Eliminar</button>
-        </div>
-      </div>`);
-  }
-}
-
-async function eliminarActivo(fundId, ticker) {
-  const tabla = ACTIVOS_TABLE[fundId];
-
-  showModal(`<div class="modal-box" style="max-width:340px;padding:40px;text-align:center">
-    <div class="spinner" style="margin:0 auto 16px"></div>
-    <div style="color:#9A9AA0;font-size:14px;font-weight:600">Eliminando activo…</div>
-  </div>`);
-
-  try {
-    const r = await fetch(`${SB_URL}/${tabla}?ticker=eq.${encodeURIComponent(ticker)}`, {
-      method: 'DELETE',
-      headers: SB_HDR,
-    });
-    if (!r.ok && r.status !== 404) throw new Error(await r.text());
-
-    // Limpiar del meta en memoria
-    if (state.meta[fundId]) delete state.meta[fundId][ticker];
-
-    closeModal();
-    cargarActivosTabla(fundId);
-  } catch(e) {
-    showModal(`<div class="modal-box" style="max-width:400px;padding:32px">
-      <div style="color:#D33A3F;font-size:15px;font-weight:700;margin-bottom:8px">Error al eliminar</div>
-      <div style="color:#9A9AA0;font-size:13px;margin-bottom:20px">${e.message}</div>
-      <button class="btn-secondary" onclick="closeModal()">Cerrar</button>
-    </div>`);
   }
 }
 </script>
