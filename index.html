@@ -2137,7 +2137,8 @@ function showActivosCMS(fundId, nuevos, denomMap) {
     const underlying = m[1];
     const stock = nuevos.find(s =>
       s.ticker !== h.ticker &&
-      s.ticker.toUpperCase().startsWith(underlying) &&
+      (s.ticker.toUpperCase().startsWith(underlying) ||
+       (s.ticker.length === underlying.length && s.ticker.toUpperCase().split('').sort().join('') === underlying.split('').sort().join(''))) &&
       !s.ticker.match(/[CP]\d{2}/) &&
       s.cantidad >= h.cantidad - 1   // call qty ≤ stock qty (cobertura parcial OK)
     );
