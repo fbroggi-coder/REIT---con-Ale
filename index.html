@@ -2271,6 +2271,39 @@ function renderActivosPage(fundId) {
     </div>`;
 }
 
+function confirmarEliminarActivo(fundId, ticker) {
+  const holdings = state.holdings[fundId] || [];
+  const enCartera = holdings.some(h => h.ticker === ticker);
+  if (enCartera) {
+    const ok = confirm(
+      `⚠️ "${ticker}" todavía está en la cartera actual.\n\n` +
+      `Eliminarlo del maestro de activos no lo quitará de los holdings, ` +
+      `pero perderás su configuración (tipo, fuente de precio, etc.).\n\n` +
+      `¿Querés eliminarlo igual?`
+    );
+    if (!ok) return;
+  } else {
+    const ok = confirm(`¿Eliminar "${ticker}" del maestro de activos?`);
+    if (!ok) return;
+  }
+  eliminarActivo(fundId, ticker);
+}
+
+async function eliminarActivo(fundId, ticker) {
+  const tabla = ACTIVOS_TABLE[fundId];
+  try {
+    const r = await fetch(`${SB_URL}/${tabla}?ticker=eq.${encodeURIComponent(ticker)}`, {
+      method: 'DELETE', headers: SB_HDR,
+    });
+    if (!r.ok) throw new Error(await r.text());
+    // Quitar de state.meta
+    if (state.meta[fundId]) delete state.meta[fundId][ticker];
+    cargarActivosTabla(fundId);
+  } catch(e) {
+    alert('Error al eliminar: ' + e.message);
+  }
+}
+
 async function cargarActivosTabla(fundId) {
   const tabla = ACTIVOS_TABLE[fundId];
   if (!tabla) return;
@@ -2299,6 +2332,7 @@ async function cargarActivosTabla(fundId) {
         <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${a.base || ''}</td>
         <td>
           <button onclick="abrirEditarActivo('${fundId}','${a.ticker}')" style="background:rgba(166,230,53,0.1);border:1px solid rgba(166,230,53,0.25);color:#A6E635;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit">Editar</button>
+          <button onclick="confirmarEliminarActivo('${fundId}','${a.ticker}')" style="background:rgba(211,58,63,0.1);border:1px solid rgba(211,58,63,0.25);color:#D33A3F;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;margin-left:4px">Eliminar</button>
         </td>
       </tr>`).join('');
 
