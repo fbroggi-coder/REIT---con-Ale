@@ -1559,7 +1559,7 @@ function generarOnePage(fundId) {
     const lamina    = meta?.lamina || 1;
     const cierre    = h.cierre * lamina;
     const tipo      = meta?.tipo  || 'Otros';
-    const cat       = meta?.categoria || 'Sin categoría';
+    const cat       = meta?.tipo || 'Otros';
     const instrMoneda = meta?.moneda || monedaFondo;
     const isShort   = ['Covered Call','Venta Call'].includes(tipo);
     const priceDisp = live ? price : cierre;
