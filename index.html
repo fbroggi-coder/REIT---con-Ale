@@ -638,6 +638,9 @@ function calcNAV(fundId) {
   const moneda    = cfg.moneda || 'ARS';
   let totalInv    = 0;
 
+  // Calls vendidos en CCs → siempre restan, sin importar el tipo guardado en activos
+  const ccCallSetNav = new Set((state.coveredCalls[fundId] || []).map(cc => cc.ticker_call));
+
   for (const h of holdings) {
     const m = meta[h.ticker];
     // Los futuros de dólar no suman al PN
@@ -645,7 +648,7 @@ function calcNAV(fundId) {
     const { price } = calcPrecio(h, m, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
     const lamina = m?.lamina || 1;
     const montoH = h.cantidad * (price / lamina);
-    const isShortCallH = ['Covered Call', 'Venta Call'].includes(m?.tipo);
+    const isShortCallH = ['Covered Call', 'Venta Call'].includes(m?.tipo) || ccCallSetNav.has(h.ticker);
     totalInv += isShortCallH ? -Math.abs(montoH) : montoH;
   }
 
