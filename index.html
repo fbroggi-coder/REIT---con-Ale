@@ -782,8 +782,8 @@ function esMercadoAbierto() {
   // Argentina = UTC-3 (sin DST)
   const now   = new Date();
   const arMin = (now.getUTCHours() * 60 + now.getUTCMinutes() - 180 + 1440) % 1440;
-  // Abierto entre 09:00 y 17:00 AR
-  return arMin >= 9 * 60 && arMin < 17 * 60;
+  // Abierto entre 09:00 y 18:00 AR
+  return arMin >= 9 * 60 && arMin < 18 * 60;
 }
 
 async function actualizarPrecios() {
