@@ -775,6 +775,14 @@ async function cargarFxAyer() {
   }
 }
 
+function esMercadoAbierto() {
+  // Argentina = UTC-3 (sin DST)
+  const now   = new Date();
+  const arMin = (now.getUTCHours() * 60 + now.getUTCMinutes() - 180 + 1440) % 1440;
+  // Abierto entre 09:00 y 17:00 AR
+  return arMin >= 9 * 60 && arMin < 17 * 60;
+}
+
 async function actualizarPrecios() {
   if (state.updatingPrices) return;
   state.updatingPrices = true;
@@ -896,6 +904,7 @@ const state = {
   breakdown:       null,  // null | 'moneda' | 'tipo' | 'cat'
   yahooMap:        {},    // { symbol: priceUSD } desde Yahoo Finance
   coveredCalls:    {},    // { [fundId]: [{id, ticker_stock, ticker_call, nombre}] }
+  cierreSnap:      {},    // { [fundId]: { [ticker]: cierre } } — snapshot del cierre anterior
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1202,7 +1211,8 @@ function renderFondo(fundId) {
     const instrMoneda = meta?.moneda || 'ARS';
     const { price, live } = calcPrecio(h, meta, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
     const lamina  = meta?.lamina || 1;
-    const cierre  = h.cierre * lamina;
+    const cierreRaw = state.cierreSnap[fundId]?.[h.ticker] ?? h.cierre;
+    const cierre  = cierreRaw * lamina;
     const monto   = h.cantidad * (price / lamina);
     const tipo    = meta?.tipo   || 'Otros';
     const isShortCall = ['Covered Call', 'Venta Call'].includes(tipo);
@@ -1383,6 +1393,10 @@ function renderFondo(fundId) {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
           Cargar PDF
         </label>
+        <button onclick="guardarCierre('${fundId}')" class="upload-btn" style="background:rgba(250,204,21,0.1);border:1px solid rgba(250,204,21,0.3);color:#FCD34D" title="Guardar snapshot de precios de cierre para variación diaria">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+          Guardar cierre
+        </button>
         <button onclick="generarOnePage('${fundId}')" class="upload-btn" style="background:rgba(166,230,53,0.1);border:1px solid rgba(166,230,53,0.3);color:#A6E635">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><polyline points="8 12 12 12 12 8"/><line x1="8" y1="16" x2="16" y2="16"/></svg>
           One Page
@@ -1557,9 +1571,10 @@ function generarOnePage(fundId) {
     const meta      = fondoMeta[h.ticker];
     const { price, live } = calcPrecio(h, meta, monedaFondo, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
     const lamina    = meta?.lamina || 1;
-    const cierre    = h.cierre * lamina;
+    const cierreRaw = state.cierreSnap[fundId]?.[h.ticker] ?? h.cierre;
+    const cierre    = cierreRaw * lamina;
     const tipo      = meta?.tipo  || 'Otros';
-    const cat       = meta?.tipo || 'Otros';
+    const cat       = meta?.categoria || 'Sin categoría';
     const instrMoneda = meta?.moneda || monedaFondo;
     const isShort   = ['Covered Call','Venta Call'].includes(tipo);
     const priceDisp = live ? price : cierre;
@@ -1802,6 +1817,59 @@ function generarOnePage(fundId) {
   w.document.close();
 }
 
+
+// ═══════════════════════════════════════════════════════════════════
+// SNAPSHOT DE CIERRES — para variación diaria correcta
+// ═══════════════════════════════════════════════════════════════════
+async function cargarCierreSnap() {
+  try {
+    const hoy    = new Date().toISOString().slice(0, 10);
+    // Último snapshot por ticker anterior a hoy (tomamos 30d para cubrir feriados largos)
+    const desde  = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+    const rows   = await sbGet(
+      '/precios_cierre?select=fund_id,ticker,cierre,fecha' +
+      '&fecha=gte.' + desde + '&fecha=lt.' + hoy +
+      '&order=fecha.desc'
+    );
+    state.cierreSnap = {};
+    for (const r of rows) {
+      if (!state.cierreSnap[r.fund_id]) state.cierreSnap[r.fund_id] = {};
+      // Primera aparición = más reciente (order desc)
+      if (!(r.ticker in state.cierreSnap[r.fund_id])) {
+        state.cierreSnap[r.fund_id][r.ticker] = parseFloat(r.cierre);
+      }
+    }
+  } catch(e) {
+    console.warn('[iEB] precios_cierre no disponible:', e.message);
+    state.cierreSnap = {};
+  }
+}
+
+async function guardarCierre(fundId) {
+  const holdings = state.holdings[fundId] || [];
+  if (holdings.length === 0) return;
+  const hoy = new Date().toISOString().slice(0, 10);
+  const body = holdings
+    .filter(h => h.cierre > 0)
+    .map(h => ({ fund_id: fundId, ticker: h.ticker, cierre: h.cierre, fecha: hoy }));
+  if (body.length === 0) return;
+  try {
+    await fetch(SB_URL + '/precios_cierre', {
+      method: 'POST',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates' },
+      body: JSON.stringify(body),
+    });
+    // Refrescar snapshot en memoria
+    if (!state.cierreSnap[fundId]) state.cierreSnap[fundId] = {};
+    for (const h of holdings) {
+      if (h.cierre > 0) state.cierreSnap[fundId][h.ticker] = h.cierre;
+    }
+    alert('Cierre guardado correctamente (' + body.length + ' activos, ' + hoy + ')');
+  } catch(e) {
+    alert('Error al guardar cierre: ' + e.message);
+  }
+}
+
 async function init() {
   render(); // pantalla de carga
 
@@ -1812,6 +1880,7 @@ async function init() {
       cargarHoldings(),
       cargarFxAyer(),
       cargarCoveredCalls(),
+      cargarCierreSnap(),
     ]);
     FUNDS_CONFIG   = fundsConfig;
     state.meta     = meta;
@@ -1831,6 +1900,7 @@ async function init() {
     render();
 
     setInterval(async () => {
+      if (!esMercadoAbierto()) return;   // fuera de horario (09–17 AR)
       const live = await fetchLivePrecios();
       state.fxLive          = live.fxLive;
       state.canje           = live.canje;
