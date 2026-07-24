@@ -2004,7 +2004,7 @@ async function parsePDF(arrayBuffer) {
     if (fmt === 'cn' && !isCicloNovaPDF) continue;
     if (fmt === 'rp' &&  isCicloNovaPDF) continue;
     // Usar norm() para ignorar acentos al comparar
-    const line = lines.find(l => norm(l.text).includes(pat));
+    const line = lines.find(l => norm(l.text).replace(/\s+/g, '').includes(pat));
     if (!line) continue;
     const nums = [...line.text.matchAll(numPat)];
     if (nums.length) {
