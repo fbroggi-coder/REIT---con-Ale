@@ -1990,21 +1990,23 @@ async function parsePDF(arrayBuffer) {
     { key: '(+) Cuenta overnight',              pat: 'CUENTA OVERNIGHT',          sign:  1 },
     { key: '(+) Rentas a cobrar',               pat: 'RENTAS A COBRAR',           sign:  1 },
     { key: '(+) Gastos diferidos (honorarios)', pat: 'GASTOS DIFERIDOS',          sign:  1 },
-    { key: '(+) Créditos por aportes',           pat: 'CREDITOSPORAPORTES',         sign:  1, fmt: 'rp' },
-    { key: '(+) Créditos',                      pat: 'CREDITOS',                  sign:  1 },
-    { key: '(−) Impuestos a pagar',             pat: 'IMPUESTOSAPAGAR',           sign: -1, fmt: 'rp' },
+    { key: '(+) Créditos',                      pat: 'CREDITOS',                  sign:  1, fmt: 'cn' },
+    { key: '(+) Créditos por aportes',          pat: 'CREDITOSPORAPORTES',        sign:  1, fmt: 'rp' },
     { key: '(+) Bony',                          pat: 'BONY',                      sign:  1, fmt: 'cn' },
     { key: '(+) Deudores por operaciones',      pat: 'DEUDORES POR OPERACION',    sign:  1, fmt: 'cn' },
     { key: '(−) Provisiones',                   pat: 'PROVISIONES',               sign: -1 },
     { key: '(−) Acreedores',                    pat: 'ACREEDORES',                sign: -1 },
     { key: '(−) Honorarios a pagar',            pat: 'HONORARIOS A PAGAR',        sign: -1 },
+    { key: '(−) Impuestos a pagar',             pat: 'IMPUESTOSAPAGAR',           sign: -1, fmt: 'rp' },
   ];
   for (const { key, pat, sign, fmt } of ajSpec) {
     // Filtrar por formato de PDF si corresponde
     if (fmt === 'cn' && !isCicloNovaPDF) continue;
     if (fmt === 'rp' &&  isCicloNovaPDF) continue;
-    // Usar norm() para ignorar acentos al comparar
-    const line = lines.find(l => norm(l.text).replace(/\s+/g, '').includes(pat));
+    // Quitar espacios de patrón y texto antes de comparar (PDF.js a veces omite espacios
+    // internos en palabras largas o multi-palabra, ej: "CUENTA OVERNIGHT" → "CUENTAOVERNIGHT")
+    const patNorm = pat.replace(/\s+/g, '');
+    const line = lines.find(l => norm(l.text).replace(/\s+/g, '').includes(patNorm));
     if (!line) continue;
     const nums = [...line.text.matchAll(numPat)];
     if (nums.length) {
