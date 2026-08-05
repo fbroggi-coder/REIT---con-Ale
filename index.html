@@ -930,6 +930,7 @@ const state = {
   lastPriceUpdate: null,  // Date de la última actualización de precios
   updatingPrices:  false, // true mientras se está actualizando
   breakdown:       null,  // null | 'moneda' | 'tipo' | 'cat'
+  breakdownBase:   'pn',  // 'pn' (PN total) | 'fin' (PN − bienes de cambio)
   yahooMap:        {},    // { symbol: priceUSD } desde Yahoo Finance
   coveredCalls:    {},    // { [fundId]: [{id, ticker_stock, ticker_call, nombre}] }
 };
@@ -1138,12 +1139,30 @@ function toggleBreakdown(mode) {
   render();
 }
 
+// Suma de los ajustes "Bienes de cambio" del fondo (inmuebles en PNIZF)
+function getBienesDeCambio(fundId) {
+  return (AJUSTES[fundId] || [])
+    .filter(a => /bienes\s+de\s+cambio/i.test(a.label || ''))
+    .reduce((s, a) => s + a.val, 0);
+}
+
+function toggleBreakdownBase(b) {
+  state.breakdownBase = b;
+  render();
+}
+
 function renderBreakdownPanel(fundId) {
   const mode = state.breakdown;
   if (!mode) return '';
 
   const { pn, totalInv } = calcNAV(fundId);
   if (pn <= 0) return '';
+
+  // Base del cálculo: PN total, o PN − bienes de cambio (solo activos financieros)
+  const bienes  = getBienesDeCambio(fundId);
+  const useFin  = state.breakdownBase === 'fin' && bienes > 0;
+  const basePN  = useFin ? pn - bienes : pn;
+  if (basePN <= 0) return '';
 
   const rawItems = calcMontosCartera(fundId);
   const items = rawItems.map(i => ({
@@ -1153,8 +1172,9 @@ function renderBreakdownPanel(fundId) {
     monto:       i.montoDisplay,
   }));
 
-  // Liquidez = PN - subtotal cartera (ajustes + honorarios netos)
-  const liquidez     = pn - totalInv;
+  // Liquidez = base - subtotal cartera (ajustes + honorarios netos).
+  // En modo "activos financieros" excluye los bienes de cambio → liquidez financiera real.
+  const liquidez     = basePN - totalInv;
   const fondoMoneda  = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
 
   const groups = {};
@@ -1192,7 +1212,7 @@ function renderBreakdownPanel(fundId) {
   const COLORS  = ['#A6E635','#7C3AED','#2DD4BF','#F59E0B','#60A5FA','#F472B6','#34D399','#FB923C','#A78BFA','#94A3B8'];
 
   const rows = sorted.map(([label, val], i) => {
-    const pct      = val / pn * 100;
+    const pct      = val / basePN * 100;
     const barW     = Math.abs(val) / maxAbs * 100;
     const isNeg    = val < 0;
     const barColor = isNeg ? '#D33A3F' : COLORS[i % COLORS.length];
@@ -1206,10 +1226,30 @@ function renderBreakdownPanel(fundId) {
       </div>`;
   }).join('');
 
+  // Toggle de base (solo si el fondo tiene bienes de cambio en sus ajustes)
+  const baseToggle = bienes > 0 ? `
+    <div style="display:flex;gap:5px;align-items:center">
+      ${[['pn','PN total'],['fin','Activos financieros']].map(([b, label]) => {
+        const active = (state.breakdownBase === b) || (b === 'pn' && state.breakdownBase !== 'fin');
+        return `<button onclick="toggleBreakdownBase('${b}')"
+          style="padding:4px 10px;border-radius:7px;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;transition:all 0.15s;
+                 background:${active ? 'rgba(166,230,53,0.15)' : 'rgba(255,255,255,0.05)'};
+                 border:1px solid ${active ? 'rgba(166,230,53,0.4)' : 'rgba(255,255,255,0.08)'};
+                 color:${active ? '#A6E635' : '#9A9AA0'}">${label}</button>`;
+      }).join('')}
+    </div>` : '';
+
+  const baseInfo = useFin
+    ? `<span style="font-weight:600;text-transform:none;letter-spacing:0;color:#9A9AA0;margin-left:8px">· base ${fARS(basePN)} (PN − bienes de cambio)</span>`
+    : '';
+
   return `
     <div style="background:#161618;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px;margin-bottom:16px">
-      <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:14px">
-        ${{ moneda: 'Composición por Moneda', tipo: 'Composición por Tipo de Activo', cat: 'Composición por Categoría' }[mode]}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+        <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px">
+          ${{ moneda: 'Composición por Moneda', tipo: 'Composición por Tipo de Activo', cat: 'Composición por Categoría' }[mode]}${baseInfo}
+        </div>
+        ${baseToggle}
       </div>
       ${rows}
     </div>`;
