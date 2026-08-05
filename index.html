@@ -1071,7 +1071,15 @@ function calcMontosCartera(fundId) {
     const monto   = h.cantidad * (price / lamina);
     const tipo    = meta?.tipo || 'Otros';
     const isOpt   = applyAdj && OPTION_TIPOS.includes(tipo);
-    const notional = isOpt ? h.cantidad * (meta?.base || 0) : 0;
+    let notional  = isOpt ? h.cantidad * (meta?.base || 0) : 0;
+    // El nocional (cantidad × BASE) está en la moneda del instrumento.
+    // Convertir a la moneda del fondo vía MEP si difieren (ej: call en ARS, fondo USD).
+    if (notional !== 0) {
+      const instrMoneda = meta?.moneda || 'ARS';
+      const fx = state.fxLive || state.fxAyer || 0;
+      if (instrMoneda === 'ARS' && moneda === 'USD' && fx > 0) notional = notional / fx;
+      else if (instrMoneda === 'USD' && moneda === 'ARS' && fx > 0) notional = notional * fx;
+    }
     return { ticker: h.ticker, meta, tipo, monto, notional, isOpt };
   });
 
