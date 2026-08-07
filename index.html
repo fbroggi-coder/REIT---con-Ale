@@ -1054,9 +1054,11 @@ function renderLanding() {
 }
 
 // ── MONTOS AJUSTADOS POR NOCIONAL DE OPCIONES (solo CICLO_NOVA) ──────
-// Para Compra/Venta/Covered Call: montoDisplay = monto + cantidad × base
+// Para Venta/Covered Call: montoDisplay = monto + cantidad × base
 // El exceso nocional se descuenta en partes iguales de los MM USD.
-const OPTION_TIPOS = ['Compra Call', 'Venta Call', 'Covered Call'];
+// Compra Call NO lleva ajuste: se valúa por la prima (cantidad × precio),
+// porque el comprador no tiene exposición nocional que respaldar.
+const OPTION_TIPOS = ['Venta Call', 'Covered Call'];
 
 function calcMontosCartera(fundId) {
   const cfg       = FUNDS_CONFIG[fundId];
