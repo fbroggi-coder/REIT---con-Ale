@@ -930,7 +930,7 @@ const state = {
   lastPriceUpdate: null,  // Date de la última actualización de precios
   updatingPrices:  false, // true mientras se está actualizando
   breakdown:       null,  // null | 'moneda' | 'tipo' | 'cat'
-  breakdownBase:   'pn',  // 'pn' (PN total) | 'fin' (PN − bienes de cambio)
+  breakdownBase:   'pn',  // 'pn' (PN total) | 'fin' (PN − bienes de cambio) | 'sub' (subtotal cartera)
   yahooMap:        {},    // { symbol: priceUSD } desde Yahoo Finance
   coveredCalls:    {},    // { [fundId]: [{id, ticker_stock, ticker_call, nombre}] }
 };
@@ -1160,10 +1160,13 @@ function renderBreakdownPanel(fundId) {
   const { pn, totalInv } = calcNAV(fundId);
   if (pn <= 0) return '';
 
-  // Base del cálculo: PN total, o PN − bienes de cambio (solo activos financieros)
+  // Base del cálculo: PN total | PN − bienes de cambio | subtotal cartera
   const bienes  = getBienesDeCambio(fundId);
-  const useFin  = state.breakdownBase === 'fin' && bienes > 0;
-  const basePN  = useFin ? pn - bienes : pn;
+  let baseSel   = state.breakdownBase || 'pn';
+  if (baseSel === 'fin' && bienes <= 0) baseSel = 'pn';  // sin bienes de cambio no aplica
+  const useFin  = baseSel === 'fin';
+  const useSub  = baseSel === 'sub';
+  const basePN  = useSub ? totalInv : (useFin ? pn - bienes : pn);
   if (basePN <= 0) return '';
 
   const rawItems = calcMontosCartera(fundId);
@@ -1176,6 +1179,7 @@ function renderBreakdownPanel(fundId) {
 
   // Liquidez = base - subtotal cartera (ajustes + honorarios netos).
   // En modo "activos financieros" excluye los bienes de cambio → liquidez financiera real.
+  // En modo "subtotal cartera" da 0 → el panel muestra solo las tenencias.
   const liquidez     = basePN - totalInv;
   const fondoMoneda  = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
 
@@ -1228,21 +1232,28 @@ function renderBreakdownPanel(fundId) {
       </div>`;
   }).join('');
 
-  // Toggle de base (solo si el fondo tiene bienes de cambio en sus ajustes)
-  const baseToggle = bienes > 0 ? `
+  // Toggle de base — "Activos financieros" solo si el fondo tiene bienes de cambio
+  const BASE_OPTS = [
+    ['pn',  'PN total'],
+    ...(bienes > 0 ? [['fin', 'Activos financieros']] : []),
+    ['sub', 'Subtotal cartera'],
+  ];
+  const baseToggle = `
     <div style="display:flex;gap:5px;align-items:center">
-      ${[['pn','PN total'],['fin','Activos financieros']].map(([b, label]) => {
-        const active = (state.breakdownBase === b) || (b === 'pn' && state.breakdownBase !== 'fin');
+      ${BASE_OPTS.map(([b, label]) => {
+        const active = baseSel === b;
         return `<button onclick="toggleBreakdownBase('${b}')"
           style="padding:4px 10px;border-radius:7px;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;transition:all 0.15s;
                  background:${active ? 'rgba(166,230,53,0.15)' : 'rgba(255,255,255,0.05)'};
                  border:1px solid ${active ? 'rgba(166,230,53,0.4)' : 'rgba(255,255,255,0.08)'};
                  color:${active ? '#A6E635' : '#9A9AA0'}">${label}</button>`;
       }).join('')}
-    </div>` : '';
+    </div>`;
 
   const baseInfo = useFin
     ? `<span style="font-weight:600;text-transform:none;letter-spacing:0;color:#9A9AA0;margin-left:8px">· base ${fARS(basePN)} (PN − bienes de cambio)</span>`
+    : useSub
+    ? `<span style="font-weight:600;text-transform:none;letter-spacing:0;color:#9A9AA0;margin-left:8px">· base ${fARS(basePN)} (subtotal cartera)</span>`
     : '';
 
   return `
