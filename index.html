@@ -658,6 +658,7 @@ function calcNAV(fundId) {
   const meta      = state.meta[fundId] || {};
   const moneda    = cfg.moneda || 'ARS';
   let totalInv    = 0;
+  let totalCierre = 0;   // misma cartera valuada a los precios del PDF
 
   for (const h of holdings) {
     const m = meta[h.ticker];
@@ -666,8 +667,10 @@ function calcNAV(fundId) {
     const { price } = calcPrecio(h, m, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
     const lamina = m?.lamina || 1;
     const montoH = h.cantidad * (price / lamina);
+    const montoC = h.cantidad * h.cierre;
     const isShortCallH = SHORT_OPT_TIPOS.includes(m?.tipo);
-    totalInv += isShortCallH ? -Math.abs(montoH) : montoH;
+    totalInv    += isShortCallH ? -Math.abs(montoH) : montoH;
+    totalCierre += isShortCallH ? -Math.abs(montoC) : montoC;
   }
 
   const ajustes   = AJUSTES[fundId] || [];
@@ -676,11 +679,20 @@ function calcNAV(fundId) {
   // PNIZF ya incluye honorarios en los ajustes del PDF → no restar el calculado
   const honorario = fundId === 'PNIZF' ? 0 : pnBruto * (cfg.feeAnual || 0) / 365;
   const pn        = pnBruto - honorario;
-  // CICLO_NOVA: cuotapartes del PDF están expresadas en milésimas → × 1000
-  const navLive   = cfg.cuotapartes > 0
-    ? (pn / cfg.cuotapartes) * (fundId === 'CICLO_NOVA' ? 1000 : 1)
-    : 0;
-  const rend      = cfg.navCierre   > 0 ? navLive / cfg.navCierre - 1 : 0;
+  // CICLO_NOVA: el PDF expresa el valor de cuotaparte "en miles" (por 1.000 cuotapartes),
+  // y las cuotapartes vienen en unidades → × 1000 para comparar con el NAV del PDF
+  // Rendimiento = variación del patrimonio vs. el mismo patrimonio a precios del PDF.
+  // Así no arrastra el redondeo del valor publicado (4 decimales) ni depende del
+  // formato de las cuotapartes; el NAV en vivo se proyecta desde el NAV oficial.
+  const pnCierre  = totalCierre + ajusteSum;
+  let rend, navLive;
+  if (pnCierre > 0 && cfg.navCierre > 0) {
+    rend    = pn / pnCierre - 1;
+    navLive = cfg.navCierre * (1 + rend);
+  } else {
+    navLive = cfg.cuotapartes > 0 ? (pn / cfg.cuotapartes) * (fundId === 'CICLO_NOVA' ? 1000 : 1) : 0;
+    rend    = cfg.navCierre > 0 ? navLive / cfg.navCierre - 1 : 0;
+  }
 
   return { totalInv, ajusteSum, pnBruto, honorario, pn, navLive, rend };
 }
@@ -767,14 +779,18 @@ async function cargarMeta() {
 
 async function cargarHoldings() {
   try {
-    const rows = await sbGet('/holdings?select=fund_id,ticker,cantidad,cierre&order=fund_id.asc');
+    let rows;
+    try { rows = await sbGet('/holdings?select=fund_id,ticker,cantidad,cierre,vencimiento,costo&order=fund_id.asc'); }
+    catch (e1) { rows = await sbGet('/holdings?select=fund_id,ticker,cantidad,cierre&order=fund_id.asc'); }
     const out = {};
     for (const r of rows) {
       if (!out[r.fund_id]) out[r.fund_id] = [];
       out[r.fund_id].push({
-        ticker:   r.ticker,
-        cantidad: parseFloat(r.cantidad),
-        cierre:   parseFloat(r.cierre),
+        ticker:      r.ticker,
+        cantidad:    parseFloat(r.cantidad),
+        cierre:      parseFloat(r.cierre),
+        vencimiento: r.vencimiento || null,
+        costo:       r.costo != null ? parseFloat(r.costo) : null,
       });
     }
     return out;
@@ -897,7 +913,7 @@ async function guardarVcpHistorial(fundId, vh) {
 
 async function cargarFxAyer() {
   try {
-    const hoy = new Date().toISOString().slice(0, 10);
+    const hoy = fechaArgISO();   // fecha en hora argentina (antes UTC: después de las 21 h tomaba el MEP de hoy como "ayer")
     const rows = await sbGet('/fx_history?fecha=lt.' + hoy + '&order=fecha.desc&limit=1');
     if (rows.length > 0) return { mep: parseFloat(rows[0].mep) || 0, ccl: parseFloat(rows[0].ccl) || 0 };
     return { mep: 0, ccl: 0 };
@@ -1054,6 +1070,9 @@ const state = {
   optVerCerradas:  false,
   optAbierto:      false, // panel de opciones desplegado
   atrib: { fundId: null, cierres: null, fx: null, loading: false, rango: '1M', grupo: 'activo', desde: '', hasta: '' },
+  limites:   {},   // { [fundId]: [{tipo, clave, max, min}] }
+  rfParams:  {},   // { [fundId]: { [ticker]: params } }
+  bench:     { on: false, data: null, loading: false, error: null },   // T-Bill 1 año (FRED DGS1 vía /api/tbill)
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1106,6 +1125,8 @@ function render() {
     root.innerHTML = renderLanding();
   } else if (state.view === 'atrib') {
     root.innerHTML = renderAtribucion(state.fundId);
+  } else if (TOOL_RENDER[state.view]) {
+    root.innerHTML = TOOL_RENDER[state.view](state.fundId);
   } else if (state.view === 'activos') {
     root.innerHTML = renderActivosPage(state.fundId);
     bindEvents();
@@ -1451,6 +1472,9 @@ function renderHistorial(fundId) {
   if (serie.length < 2) return '';
   const cfg   = FUNDS_CONFIG[fundId] || {};
   const color = cfg.color || '#A6E635';
+  // Mostrar en la misma escala que el NAV de la cartera (ej. Ciclo Nova "en miles")
+  const escala = cfg.navCierre > 0 && serie[serie.length - 1].vcp > 0
+    ? Math.pow(10, Math.round(Math.log10(cfg.navCierre / serie[serie.length - 1].vcp))) : 1;
   const R     = rendimientosHist(serie);
 
   // ── Tiles de rendimiento
@@ -1470,17 +1494,30 @@ function renderHistorial(fundId) {
   }
   if (pts.length < 2) pts = serie.slice(-2);
   const rendRango = pts[pts.length - 1].vcp / pts[0].vcp - 1;
+  // Benchmark T-Bill 1 año: arranca en el mismo valor que el fondo y devenga la tasa
+  // vigente cada día (tasa anual × días / 365), sobre las mismas fechas del gráfico.
+  const B = state.bench;
+  let bench = null;
+  if (B.on && B.data?.length) {
+    const tasaAl = f => { let r = null; for (const x of B.data) { if (x.fecha <= f) r = x.tasa; else break; } return r ?? B.data[0].tasa; };
+    bench = [pts[0].vcp];
+    for (let i = 1; i < pts.length; i++)
+      bench.push(bench[i - 1] * (1 + tasaAl(pts[i - 1].fecha) / 100 * diasEntre(pts[i - 1].fecha, pts[i].fecha) / 365));
+  }
+  const rendBench = bench ? bench[bench.length - 1] / bench[0] - 1 : null;
 
   // ── Geometría
-  const W = 1000, H = 240, ml = 64, mr = 16, mt = 12, mb = 28;
+  const _maxLbl = f4(Math.max(...pts.map(p => p.vcp)) * escala * 1.05).length;
+  const W = 1000, H = 240, ml = Math.max(64, _maxLbl * 7.4 + 14), mr = 16, mt = 12, mb = 28;
   const iw = W - ml - mr, ih = H - mt - mb;
-  const vals = pts.map(p => p.vcp);
+  const vals = pts.map(p => p.vcp).concat(bench || []);
   let lo = Math.min(...vals), hi = Math.max(...vals);
   const pad = (hi - lo) * 0.08 || hi * 0.005;
   lo -= pad; hi += pad;
   const X = i => ml + (pts.length === 1 ? 0 : i / (pts.length - 1) * iw);
   const Y = v => mt + (1 - (v - lo) / (hi - lo)) * ih;
-  _histChart = { fundId, pts, X, Y, W, H, ml, mr, mt, mb };
+  _histChart = { fundId, pts, X, Y, W, H, ml, mr, mt, mb, escala, bench };
+  const pathBench = bench ? bench.map((v, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1)).join(' ') : '';
 
   const path = pts.map((p, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(p.vcp).toFixed(1)).join(' ');
   const area = path + ` L${X(pts.length - 1).toFixed(1)} ${mt + ih} L${ml} ${mt + ih} Z`;
@@ -1488,7 +1525,7 @@ function renderHistorial(fundId) {
   const yTicks = [0, 1, 2, 3].map(k => lo + (hi - lo) * (k + 0.5) / 4);
   const grid = yTicks.map(v => `
     <line x1="${ml}" x2="${W - mr}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
-    <text x="${ml - 8}" y="${(Y(v) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#5A5A60" font-family="JetBrains Mono, monospace">${f4(v)}</text>`).join('');
+    <text x="${ml - 8}" y="${(Y(v) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#5A5A60" font-family="JetBrains Mono, monospace">${f4(v * escala)}</text>`).join('');
   const nX = Math.min(6, pts.length);
   const xIdx = [...new Set(Array.from({ length: nX }, (_, k) => Math.round(k * (pts.length - 1) / (nX - 1 || 1))))];
   const xLabels = xIdx.map(i => `
@@ -1510,7 +1547,7 @@ function renderHistorial(fundId) {
         <div>
           <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px">Evolución cuotaparte · Clase A</div>
           <div style="display:flex;align-items:baseline;gap:10px">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800">${f4(R.last.vcp)}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800">${f4(R.last.vcp * escala)}</span>
             <span style="font-size:12px;color:#9A9AA0">cierre ${fDiaHist(R.last.fecha, true)}</span>
           </div>
         </div>
@@ -1519,14 +1556,28 @@ function renderHistorial(fundId) {
         </div>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
-        <div style="display:flex;gap:5px;flex-wrap:wrap">${rangeBtns}</div>
-        <div style="font-size:12px;color:#9A9AA0">Período: <strong style="font-family:'JetBrains Mono',monospace;color:${rendRango >= 0 ? '#2E9E2A' : '#D33A3F'}">${fPct(rendRango)}</strong></div>
+        <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">${rangeBtns}
+          <span style="width:8px"></span>
+          <button onclick="toggleBench()" title="Comparar contra el rendimiento del T-Bill a 1 año (FRED, DGS1)"
+            style="padding:4px 10px;border-radius:7px;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;
+                   background:${B.on ? 'rgba(96,165,250,0.15)' : 'rgba(255,255,255,0.05)'};border:1px solid ${B.on ? 'rgba(96,165,250,0.45)' : 'rgba(255,255,255,0.08)'};color:${B.on ? '#60A5FA' : '#9A9AA0'}">
+            ${B.loading ? 'Cargando…' : (B.on ? '✓ ' : '+ ') + 'T-Bill 1 año'}</button>
+          ${B.error ? `<span style="font-size:11px;color:#F59E0B">${B.error}</span>` : ''}
+        </div>
+        <div style="font-size:12px;color:#9A9AA0;display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+          ${bench ? `<span style="display:inline-flex;align-items:center;gap:6px"><svg width="18" height="4"><line x1="0" y1="2" x2="18" y2="2" stroke="${color}" stroke-width="2"/></svg>${cfg.nombre || fundId}</span>` : ''}
+          <span>Período: <strong style="font-family:'JetBrains Mono',monospace;color:${rendRango >= 0 ? '#2E9E2A' : '#D33A3F'}">${fPct(rendRango)}</strong></span>
+          ${bench ? `<span style="display:inline-flex;align-items:center;gap:6px"><svg width="18" height="4"><line x1="0" y1="2" x2="18" y2="2" stroke="#60A5FA" stroke-width="2" stroke-dasharray="5 3"/></svg>T-Bill 1 año
+              <strong style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${fPct(rendBench)}</strong></span>
+            <span>Diferencia <strong style="font-family:'JetBrains Mono',monospace;color:${rendRango - rendBench >= 0 ? '#2E9E2A' : '#D33A3F'}">${(rendRango - rendBench >= 0 ? '+' : '−') + f2(Math.abs(rendRango - rendBench) * 100)} pp</strong></span>` : ''}
+        </div>
       </div>
       <div id="hist-wrap" style="position:relative">
         <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img"
              aria-label="Evolución del valor de cuotaparte Clase A, ${fDiaHist(pts[0].fecha, true)} a ${fDiaHist(pts[lastI].fecha, true)}">
           ${grid}
           <path d="${area}" fill="${color}" opacity="0.07"/>
+          ${bench ? `<path d="${pathBench}" fill="none" stroke="#60A5FA" stroke-width="2" stroke-dasharray="6 4" stroke-linejoin="round" stroke-linecap="round"/>` : ''}
           <path d="${path}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
           <circle cx="${X(lastI).toFixed(1)}" cy="${Y(pts[lastI].vcp).toFixed(1)}" r="4" fill="${color}" stroke="#161618" stroke-width="2"/>
           ${xLabels}
@@ -1559,14 +1610,39 @@ function histHover(ev) {
   const vr   = p.vcp / c.pts[0].vcp - 1;
   const tip  = document.getElementById('hist-tip');
   tip.innerHTML = `<div style="color:#9A9AA0;margin-bottom:3px">${fDiaHist(p.fecha, true)}</div>
-    <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:14px;color:#E5E5E7">${f4(p.vcp)}</div>
+    <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:14px;color:#E5E5E7">${f4(p.vcp * c.escala)}</div>
     <div style="color:#9A9AA0;margin-top:2px">Día <span style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${vd == null ? '—' : fPct(vd)}</span>
-      · Período <span style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${fPct(vr)}</span></div>`;
+      · Período <span style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${fPct(vr)}</span></div>
+    ${c.bench ? `<div style="color:#9A9AA0;margin-top:2px">T-Bill 1 año <span style="font-family:'JetBrains Mono',monospace;color:#60A5FA">${fPct(c.bench[i] / c.bench[0] - 1)}</span>
+      · Dif. <span style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${f2((vr - (c.bench[i] / c.bench[0] - 1)) * 100)} pp</span></div>` : ''}`;
   tip.style.display = '';
   const wrapW = box.width, left = px / c.W * wrapW;
   const tw = tip.offsetWidth;
   tip.style.left = Math.max(0, Math.min(wrapW - tw, left + 12 > wrapW - tw ? left - tw - 12 : left + 12)) + 'px';
 }
+async function toggleBench() {
+  const B = state.bench;
+  if (B.on) { B.on = false; render(); return; }
+  B.on = true; B.error = null;
+  if (!B.data) {
+    B.loading = true; render();
+    try {
+      const desde = Object.values(state.historial).flat().reduce((m, p) => p.fecha < m ? p.fecha : m, '9999') ;
+      const d0 = desde < '9999' ? isoLocal(new Date(new Date(desde + 'T12:00:00').getTime() - 15 * 86400000)) : '2024-01-01';
+      const r = await fetch('/api/tbill?desde=' + d0);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      if (!Array.isArray(data) || !data.length) throw new Error('sin datos');
+      B.data = data;
+    } catch (e) {
+      B.on = false; B.error = 'No se pudo cargar el T-Bill (' + e.message + ')';
+      console.warn('[iEB] T-Bill:', e);
+    }
+    B.loading = false;
+  }
+  render();
+}
+
 function histLeave() {
   const g = document.getElementById('hist-hover'); if (g) g.style.display = 'none';
   const t = document.getElementById('hist-tip');   if (t) t.style.display = 'none';
@@ -1601,7 +1677,7 @@ function calcOpcion(o) {
   const cob   = M && F != null ? (M - F) / M : null;
   const dist  = M && K ? M / K - 1 : null;
   const itm   = M != null ? (isPut ? M < K : M > K) : null;
-  const hoy   = isoLocal(new Date());
+  const hoy   = fechaArgISO();
   const dias  = o.vencimiento ? diasEntre(hoy, o.vencimiento) : null;
   const plazo = o.fecha_operacion && o.vencimiento ? diasEntre(o.fecha_operacion, o.vencimiento) : null;
   const rPer  = F > 0 ? (K - F) / F : null;
@@ -1929,6 +2005,1062 @@ async function eliminarOpcion(fundId, id) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// HERRAMIENTAS: navegación por pestañas + carga de datos auxiliares
+// ═══════════════════════════════════════════════════════════════════
+const TOOL_TABS = [
+  ['fund',  'Cartera'],
+  ['atrib', 'Atribución'],
+  ['venc',  'Vencimientos'],
+  ['costo', 'Resultado vs costo'],
+  ['rf',    'Renta fija'],
+  ['conc',  'Concentración'],
+  ['sim',   'Simulador'],
+];
+
+function irA(view) {
+  if (view === 'atrib') { abrirAtribucion(state.fundId); return; }
+  state.view = view;
+  render();
+  window.scrollTo(0, 0);
+}
+
+function renderTabs(fundId, activa) {
+  const nAlertas = typeof alertasConcentracion === 'function' ? alertasConcentracion(fundId).filter(a => a.estado === 'excedido').length : 0;
+  return `
+    <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px;border-bottom:1px solid rgba(255,255,255,0.08)">
+      ${TOOL_TABS.map(([k, label]) => {
+        const on = k === activa;
+        const badge = k === 'conc' && nAlertas ? ` <span style="display:inline-block;min-width:16px;padding:0 5px;border-radius:8px;background:#D33A3F;color:#fff;font-size:10px;line-height:16px;text-align:center">${nAlertas}</span>` : '';
+        return `<button onclick="irA('${k}')"
+          style="padding:9px 14px;font-size:13px;font-weight:${on ? 800 : 600};font-family:inherit;cursor:pointer;background:none;border:none;
+                 border-bottom:2px solid ${on ? '#A6E635' : 'transparent'};margin-bottom:-1px;color:${on ? '#E5E5E7' : '#9A9AA0'}">${label}${badge}</button>`;
+      }).join('')}
+    </div>`;
+}
+
+// Página estándar de herramienta: topbar + nombre del fondo + pestañas + contenido
+function renderToolPage(fundId, activa, acciones, cuerpo) {
+  const cfg = FUNDS_CONFIG[fundId] || {};
+  return `
+    ${renderTopBar({ showBack: true })}
+    <div class="fund-page">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+        <div style="font-size:20px;font-weight:800;letter-spacing:-0.4px">${cfg.nombre || fundId}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">${acciones || ''}</div>
+      </div>
+      ${renderTabs(fundId, activa)}
+      ${cuerpo}
+    </div>`;
+}
+
+// Panel con título (estilo común de las herramientas)
+function panel(titulo, cuerpo, extra) {
+  return `
+    <div style="background:#161618;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px;margin-bottom:16px">
+      ${titulo ? `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px">${titulo}</div>${extra || ''}</div>` : ''}
+      ${cuerpo}
+    </div>`;
+}
+function pillBtn(active, label, onclick) {
+  return `<button onclick="${onclick}"
+    style="padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;
+           background:${active ? 'rgba(166,230,53,0.15)' : 'rgba(255,255,255,0.05)'};
+           border:1px solid ${active ? 'rgba(166,230,53,0.4)' : 'rgba(255,255,255,0.08)'};
+           color:${active ? '#A6E635' : '#9A9AA0'}">${label}</button>`;
+}
+function statTile(label, val, sub, color) {
+  return `
+    <div style="min-width:140px">
+      <div class="metric-label">${label}</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:800;color:${color || '#E5E5E7'}">${val}</div>
+      ${sub ? `<div style="font-size:11px;color:#5A5A60;margin-top:2px">${sub}</div>` : ''}
+    </div>`;
+}
+const fMon = (fundId, n) => {
+  const m = FUNDS_CONFIG[fundId]?.moneda === 'USD' ? 'USD ' : '$ ';
+  return (n < 0 ? '−' : '') + m + _ar0.format(Math.round(Math.abs(n)));
+};
+const colorSigno = v => v == null || Math.abs(v) < 1e-9 ? '#9A9AA0' : v > 0 ? '#2E9E2A' : '#D33A3F';
+
+async function cargarLimites() {
+  try {
+    const rows = await sbGet('/limites?select=fund_id,tipo,clave,max_pct,min_pct');
+    const out = {};
+    for (const r of rows) (out[r.fund_id] = out[r.fund_id] || []).push({
+      tipo: r.tipo, clave: r.clave || '', max: r.max_pct != null ? +r.max_pct : null, min: r.min_pct != null ? +r.min_pct : null });
+    return out;
+  } catch (e) { console.warn('[iEB] cargarLimites (¿corriste herramientas.sql?):', e.message); return {}; }
+}
+async function cargarRfParams() {
+  try {
+    const rows = await sbGet('/renta_fija_params?select=*');
+    const out = {};
+    for (const r of rows) (out[r.fund_id] = out[r.fund_id] || {})[r.ticker] = r;
+    return out;
+  } catch (e) { console.warn('[iEB] cargarRfParams (¿corriste herramientas.sql?):', e.message); return {}; }
+}
+
+// Valor actual de cada tenencia en moneda del fondo (con signo para posiciones vendidas)
+function valuarTenencias(fundId) {
+  const cfg = FUNDS_CONFIG[fundId] || {};
+  const moneda = cfg.moneda || 'ARS';
+  const meta = state.meta[fundId] || {};
+  return (state.holdings[fundId] || []).map(h => {
+    const m = meta[h.ticker];
+    const { price, live } = calcPrecio(h, m, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
+    const lamina = m?.lamina || 1;
+    const corto  = SHORT_OPT_TIPOS.includes(m?.tipo);
+    const monto  = (corto ? -1 : 1) * Math.abs(h.cantidad * price / lamina);
+    return { h, m, ticker: h.ticker, price, live, lamina, corto, monto,
+             tipo: m?.tipo || 'Otros', cat: m?.categoria || 'Sin categoría', moneda: m?.moneda || moneda };
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// RENTA FIJA: flujos, TIR y duration
+// ═══════════════════════════════════════════════════════════════════
+// Métodos por instrumento (tabla renta_fija_params):
+//   cero    → un solo pago al vencimiento (valor_final por 1 de nominal; default 1)
+//   bullet  → cupón fijo (% anual, n pagos por año) + capital al vencimiento
+//   flujos  → lista de pagos cargada a mano (fecha; monto por 1 de nominal)
+//   manual  → TIR y duration modificada informadas a mano (duales, CER, TIPS…)
+// Automático sin configurar: cheques de pago diferido y T-Bills = cero cupón a 1.
+// El precio se lleva a la moneda de los flujos: ARS = × MEP, USD cable = ÷ canje (CCL/MEP).
+const RF_TIPOS_RE = /soberano|^on\b|\bon\b|bono|letra|lecap|boncap|pagar|cheque|treasury|t-?bill|dual|\bcer\b/i;
+const RF_METODOS = { cero: 'Cero cupón', bullet: 'Cupón fijo (bullet)', flujos: 'Flujos a mano', manual: 'TIR manual' };
+
+function esRentaFija(h, m) {
+  const tipo = m?.tipo || '';
+  if (/^short/i.test(tipo) || SHORT_OPT_TIPOS.includes(tipo) || esLiquidez(m)) return false;
+  return m?.categoria === 'Renta Fija' || RF_TIPOS_RE.test(tipo) || !!h?.vencimiento;
+}
+
+function rfAuto(ticker, m) {
+  if (/^(UMV|MAV|CPD|ECH)/.test(ticker) || /cheque/i.test(m?.tipo || ''))
+    return { metodo: 'cero', moneda_flujos: m?.moneda === 'ARS' ? 'ARS' : 'USD', valor_final: 1, _auto: 'Cheque' };
+  if (/^US912797/.test(ticker))
+    return { metodo: 'cero', moneda_flujos: 'USD cable', valor_final: 1, _auto: 'T-Bill' };
+  return null;
+}
+
+function rfParamsDe(fundId, ticker, m) {
+  return state.rfParams[fundId]?.[ticker] || rfAuto(ticker, m);
+}
+
+function canjeRef() {
+  if (state.canje && state.canje !== 1) return state.canje;
+  return state.fxAyer > 0 && state.fxAyerCCL > 0 ? state.fxAyerCCL / state.fxAyer : 1;
+}
+const mepRef = () => state.fxLive || state.fxAyer || 0;
+
+// Factor para pasar un importe de la moneda de los flujos a la moneda del fondo
+function factorAFondo(fundId, monedaFlujos) {
+  const fondo = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
+  const mep = mepRef(), canje = canjeRef();
+  if (fondo === 'USD') {
+    if (monedaFlujos === 'ARS') return mep > 0 ? 1 / mep : null;
+    if (monedaFlujos === 'USD cable') return canje;
+    return 1;
+  }
+  if (monedaFlujos === 'ARS') return 1;
+  if (monedaFlujos === 'USD cable') return mep * canje || null;
+  return mep || null;
+}
+
+function addMeses(iso, n) {
+  const d = new Date(iso + 'T12:00:00');
+  const dia = d.getDate();
+  d.setDate(1); d.setMonth(d.getMonth() + n);
+  const ult = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(dia, ult));
+  return isoLocal(d);
+}
+
+// Flujos futuros por 1 de nominal: [{fecha, monto, tipo:'cupon'|'amort'|'vto'}]
+function rfFlujos(p, vtoPDF, hoy) {
+  if (!p) return [];
+  const vto = p.vencimiento || vtoPDF;
+  if (p.metodo === 'cero') return vto && vto > hoy ? [{ fecha: vto, monto: +(p.valor_final ?? 1) || 1, tipo: 'vto' }] : [];
+  if (p.metodo === 'bullet') {
+    if (!vto || vto <= hoy) return [];
+    const f = Math.max(1, +p.frecuencia || 2), c = (+p.cupon || 0) / 100 / f, vf = +(p.valor_final ?? 1) || 1;
+    const out = [];
+    for (let k = 0, fecha = vto; fecha > hoy && k < 400; k++, fecha = addMeses(vto, -12 / f * k)) {
+      out.push({ fecha, monto: c + (k === 0 ? vf : 0), tipo: k === 0 ? 'vto' : 'cupon' });
+    }
+    return out.reverse();
+  }
+  if (p.metodo === 'flujos') {
+    const fl = (p.flujos || []).filter(x => x.fecha > hoy).sort((a, b) => a.fecha.localeCompare(b.fecha));
+    return fl.map((x, i) => ({ fecha: x.fecha, monto: +x.monto, tipo: i === fl.length - 1 ? 'vto' : 'cupon' }));
+  }
+  return [];
+}
+
+// TIR efectiva anual (base 365) y duration por bisección
+function rfTir(flujos, precio, hoy) {
+  if (!(precio > 0) || !flujos.length) return null;
+  const t = flujos.map(x => Math.max(diasEntre(hoy, x.fecha), 0) / 365);
+  const pv = y => flujos.reduce((s, x, i) => s + x.monto / Math.pow(1 + y, t[i]), 0);
+  let lo = -0.95, hi = 20;
+  if ((pv(lo) - precio) * (pv(hi) - precio) > 0) return null;
+  for (let i = 0; i < 200; i++) {
+    const mid = (lo + hi) / 2;
+    if (pv(mid) > precio) lo = mid; else hi = mid;
+  }
+  const y = (lo + hi) / 2;
+  const mac = flujos.reduce((s, x, i) => s + t[i] * x.monto / Math.pow(1 + y, t[i]), 0) / precio;
+  return { tir: y, mac, md: mac / (1 + y) };
+}
+
+function calcRentaFija(fundId) {
+  const hoy = fechaArgISO();
+  const pn  = calcNAV(fundId).pn;
+  const fondo = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
+  return valuarTenencias(fundId).filter(v => esRentaFija(v.h, v.m)).map(v => {
+    const p = rfParamsDe(fundId, v.ticker, v.m);
+    const monFl = p?.moneda_flujos || (v.moneda === 'ARS' ? 'ARS' : 'USD');
+    const fac = factorAFondo(fundId, monFl);
+    const precioFondo = v.h.cantidad ? v.monto / v.h.cantidad : 0;          // por 1 de nominal, moneda del fondo
+    const precioFl = fac ? precioFondo / fac : null;                         // por 1 de nominal, moneda de los flujos
+    const flujos = rfFlujos(p, v.h.vencimiento, hoy);
+    let tir = null, md = null, mac = null;
+    if (p?.metodo === 'manual') {
+      tir = p.tir_manual != null ? +p.tir_manual / 100 : null;
+      md  = p.md_manual  != null ? +p.md_manual : null;
+    } else {
+      const r = rfTir(flujos, precioFl, hoy);
+      if (r) ({ tir, md, mac } = r);
+    }
+    return {
+      ticker: v.ticker, tipo: v.tipo, cat: v.cat, h: v.h, m: v.m, p, monFl,
+      monedaTir: monFl === 'ARS' ? 'ARS' : 'USD',
+      valor: v.monto, peso: pn > 0 ? v.monto / pn : 0, precioFl, fac, flujos,
+      vto: p?.vencimiento || v.h.vencimiento || null, tir, md, mac,
+      estado: !p ? 'sin' : (tir == null ? 'error' : (p._auto ? 'auto' : 'ok')),
+    };
+  });
+}
+
+// ── Vista Renta fija ────────────────────────────────────────────────
+function renderRentaFija(fundId) {
+  const A = state.rfVista || (state.rfVista = { grupo: 'moneda' });
+  const filas = calcRentaFija(fundId);
+  const pn = calcNAV(fundId).pn;
+  const conDato = filas.filter(f => f.tir != null || f.md != null);
+  const valorTot = filas.reduce((s, f) => s + f.valor, 0);
+  const valorCon = conDato.reduce((s, f) => s + f.valor, 0);
+  const prom = (lista, k) => {
+    const l = lista.filter(f => f[k] != null);
+    const w = l.reduce((s, f) => s + f.valor, 0);
+    return w > 0 ? l.reduce((s, f) => s + f[k] * f.valor, 0) / w : null;
+  };
+  const fTir = v => v == null ? '—' : f2(v * 100) + '%';
+  const fMd  = v => v == null ? '—' : f2(v);
+
+  // Resumen por moneda (la TIR solo se promedia dentro de la misma moneda)
+  const porMon = ['USD', 'ARS'].map(mn => {
+    const l = filas.filter(f => f.monedaTir === mn);
+    return { mn, valor: l.reduce((s, f) => s + f.valor, 0), tir: prom(l, 'tir'), md: prom(l, 'md'),
+             cob: l.length ? l.filter(f => f.tir != null || f.md != null).reduce((s, f) => s + f.valor, 0) / (l.reduce((s, f) => s + f.valor, 0) || 1) : 0 };
+  }).filter(x => x.valor > 0);
+
+  const tiles = `
+    <div style="display:flex;gap:26px;flex-wrap:wrap">
+      ${statTile('Renta fija', fMon(fundId, valorTot), pn > 0 ? f2(valorTot / pn * 100) + '% del patrimonio' : '')}
+      ${statTile('Duration modificada', fMd(prom(filas, 'md')), 'años, toda la renta fija')}
+      ${porMon.map(x => statTile('TIR ' + (x.mn === 'USD' ? 'en dólares' : 'en pesos'), fTir(x.tir), 'MD ' + fMd(x.md) + ' · ' + fMon(fundId, x.valor))).join('')}
+      ${statTile('Con datos', valorTot > 0 ? f2(valorCon / valorTot * 100) + '%' : '—', conDato.length + ' de ' + filas.length + ' instrumentos', valorCon < valorTot ? '#F59E0B' : '#2E9E2A')}
+    </div>`;
+
+  // Agrupado
+  const grupos = {};
+  for (const f of filas) {
+    const k = A.grupo === 'tipo' ? f.tipo : (A.grupo === 'cat' ? f.cat : f.monedaTir);
+    (grupos[k] = grupos[k] || []).push(f);
+  }
+  const filasGrupo = Object.entries(grupos).map(([k, l]) => {
+    const monedas = new Set(l.filter(f => f.tir != null).map(f => f.monedaTir));
+    const valor = l.reduce((s, f) => s + f.valor, 0);
+    const cob = l.filter(f => f.tir != null || f.md != null).reduce((s, f) => s + f.valor, 0) / (valor || 1);
+    return { k, valor, peso: pn > 0 ? valor / pn : 0, tir: monedas.size > 1 ? 'mix' : prom(l, 'tir'), md: prom(l, 'md'), cob, n: l.length };
+  }).sort((a, b) => b.valor - a.valor);
+  const tablaGrupo = `
+    <div class="table-wrap"><table>
+      <thead><tr><th>${{ moneda: 'Moneda', tipo: 'Tipo', cat: 'Categoría' }[A.grupo]}</th><th class="num">Valor</th><th class="num">% PN</th>
+        <th class="num">TIR prom.</th><th class="num">Duration mod.</th><th class="num">Con datos</th></tr></thead>
+      <tbody>${filasGrupo.map(g => `
+        <tr><td>${g.k} <span style="color:#5A5A60;font-size:11px">(${g.n})</span></td>
+          <td class="num">${fMon(fundId, g.valor)}</td><td class="num">${f2(g.peso * 100)}%</td>
+          <td class="num">${g.tir === 'mix' ? '<span title="Mezcla pesos y dólares: mirá la vista por moneda" style="color:#5A5A60">monedas mixtas</span>' : fTir(g.tir)}</td>
+          <td class="num">${fMd(g.md)}</td>
+          <td class="num" style="color:${g.cob < 0.999 ? '#F59E0B' : '#9A9AA0'}">${f2(g.cob * 100)}%</td></tr>`).join('')}
+      </tbody></table></div>`;
+
+  // Detalle por instrumento
+  const estadoChip = f => {
+    if (f.estado === 'ok')   return '<span style="color:#9A9AA0;font-size:11px">' + RF_METODOS[f.p.metodo] + '</span>';
+    if (f.estado === 'auto') return '<span style="color:#9A9AA0;font-size:11px">Automático (' + f.p._auto + ')</span>';
+    if (f.estado === 'sin')  return '<span style="color:#F59E0B;font-size:11px;font-weight:700">Sin configurar</span>';
+    return '<span style="color:#D33A3F;font-size:11px;font-weight:700" title="Revisá vencimiento, flujos o moneda">No calcula</span>';
+  };
+  const det = filas.sort((a, b) => b.valor - a.valor).map(f => `
+    <tr>
+      <td><span class="ticker-chip">${f.ticker}</span><span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">${f.tipo}</span></td>
+      <td class="num">${fMon(fundId, f.valor)}</td>
+      <td class="num">${f2(f.peso * 100)}%</td>
+      <td class="num">${f.vto ? fDiaHist(f.vto, true) : '—'}</td>
+      <td class="num">${f.monFl}</td>
+      <td class="num" title="Precio por 1 de nominal en la moneda de los flujos">${f.precioFl != null ? f4(f.precioFl) : '—'}</td>
+      <td class="num" style="font-weight:700">${fTir(f.tir)}</td>
+      <td class="num">${fMd(f.md)}</td>
+      <td>${estadoChip(f)}</td>
+      <td><button onclick="abrirRfParams('${fundId}','${f.ticker}')" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#C0C0C8;padding:3px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit">✎</button></td>
+    </tr>`).join('');
+
+  const cuerpo = `
+    ${panel('Renta fija · TIR y duration', tiles)}
+    ${panel('Resumen', tablaGrupo, `<div style="display:flex;gap:6px">${[['moneda','Moneda'],['tipo','Tipo de activo'],['cat','Categoría']].map(([k,l]) => pillBtn(A.grupo === k, l, `state.rfVista.grupo='${k}';render()`)).join('')}</div>`)}
+    ${panel('Por instrumento', `
+      <div style="font-size:12px;color:#5A5A60;margin-bottom:10px">La TIR sale de los flujos y el precio actual (en vivo si hay, si no el del PDF). Con ✎ elegís el método de cada bono: cero cupón, cupón fijo, flujos cargados a mano o TIR manual (para duales, CER o bonos que amortizan si no querés cargar los flujos).</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Activo</th><th class="num">Valor</th><th class="num">% PN</th><th class="num">Vencimiento</th><th class="num">Moneda flujos</th>
+          <th class="num">Precio</th><th class="num">TIR</th><th class="num">Duration mod.</th><th>Método</th><th></th></tr></thead>
+        <tbody>${det || '<tr><td colspan="10" style="color:#5A5A60">No hay instrumentos de renta fija.</td></tr>'}</tbody>
+      </table></div>`)}`;
+  return renderToolPage(fundId, 'rf', '', cuerpo);
+}
+
+function abrirRfParams(fundId, ticker) {
+  const m = state.meta[fundId]?.[ticker];
+  const h = (state.holdings[fundId] || []).find(x => x.ticker === ticker);
+  const p = state.rfParams[fundId]?.[ticker] || rfAuto(ticker, m) || { metodo: 'bullet', moneda_flujos: m?.moneda === 'ARS' ? 'ARS' : 'USD', valor_final: 1, frecuencia: 2 };
+  const v = (k, d = '') => p[k] != null ? p[k] : d;
+  const flujosTxt = (p.flujos || []).map(x => fDiaHist(x.fecha, true) + ' ; ' + x.monto).join('\n');
+  const inp = (id, label, val, ph, type = 'text') => `
+    <div><div style="font-size:11px;color:#9A9AA0;margin-bottom:4px;font-weight:600">${label}</div>
+      <input id="rf-${id}" type="${type}" step="any" class="cms-input" style="width:100%;box-sizing:border-box;font-family:'JetBrains Mono',monospace;font-size:12px" value="${val}" placeholder="${ph}"></div>`;
+  const sel = (id, label, opts, val) => `
+    <div><div style="font-size:11px;color:#9A9AA0;margin-bottom:4px;font-weight:600">${label}</div>
+      <select id="rf-${id}" class="cms-select" style="width:100%;box-sizing:border-box" ${id === 'metodo' ? 'onchange="rfMostrarCampos()"' : ''}>
+        ${opts.map(([k, l]) => `<option value="${k}" ${k === val ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
+  showModal(`
+    <div class="modal-box" style="max-width:540px">
+      <div class="modal-header">
+        <div><div style="font-size:11px;color:#5A5A60;font-weight:700;text-transform:uppercase">Renta fija</div>
+          <div style="font-size:16px;font-weight:800">${ticker}${h?.vencimiento ? ` <span style="font-size:12px;color:#9A9AA0;font-weight:600">· vence ${fDiaHist(h.vencimiento, true)} según PDF</span>` : ''}</div></div>
+        <button onclick="closeModal()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:18px">✕</button>
+      </div>
+      <div class="modal-body" style="display:grid;gap:10px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          ${sel('metodo', 'Método', Object.entries(RF_METODOS), v('metodo'))}
+          ${sel('mon', 'Moneda de los flujos', [['USD', 'USD (MEP)'], ['USD cable', 'USD cable'], ['ARS', 'Pesos']], v('moneda_flujos'))}
+        </div>
+        <div id="rf-g-vto" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          ${inp('vto', 'Vencimiento (vacío = el del PDF)', v('vencimiento'), '', 'date')}
+          ${inp('vf', 'Pago final por 1 de nominal', v('valor_final', 1), '1')}
+        </div>
+        <div id="rf-g-bullet" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          ${inp('cupon', 'Cupón % anual', v('cupon'), 'ej: 8.5')}
+          ${sel('freq', 'Pagos por año', [['1', 'Anual'], ['2', 'Semestral'], ['4', 'Trimestral'], ['12', 'Mensual']], String(v('frecuencia', 2)))}
+        </div>
+        <div id="rf-g-flujos">
+          <div style="font-size:11px;color:#9A9AA0;margin-bottom:4px;font-weight:600">Flujos por 1 de nominal (una línea por pago: fecha ; monto)</div>
+          <textarea id="rf-flujos" class="cms-input" style="width:100%;box-sizing:border-box;height:130px;font-family:'JetBrains Mono',monospace;font-size:12px" placeholder="09/01/2027 ; 0,0475&#10;09/07/2027 ; 0,0475">${flujosTxt}</textarea>
+          <div style="font-size:11px;color:#5A5A60;margin-top:4px">Ej. un bono que amortiza: cada línea es cupón + amortización de esa fecha. Se puede pegar desde Excel.</div>
+        </div>
+        <div id="rf-g-manual" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          ${inp('tir', 'TIR % anual', v('tir_manual'), 'ej: 9.8')}
+          ${inp('md', 'Duration modificada (años)', v('md_manual'), 'ej: 2.4')}
+        </div>
+        <div id="rf-err" style="color:#D33A3F;font-size:12px;font-weight:600"></div>
+      </div>
+      <div class="modal-footer">
+        ${state.rfParams[fundId]?.[ticker] ? `<button class="btn-secondary" onclick="borrarRfParams('${fundId}','${ticker}')">Borrar configuración</button>` : ''}
+        <button class="btn-secondary" onclick="closeModal()">Cancelar</button>
+        <button class="btn-primary" onclick="guardarRfParams('${fundId}','${ticker}')">💾 Guardar</button>
+      </div>
+    </div>`);
+  rfMostrarCampos();
+}
+function rfMostrarCampos() {
+  const m = document.getElementById('rf-metodo')?.value;
+  const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+  show('rf-g-vto', m === 'cero' || m === 'bullet');
+  show('rf-g-bullet', m === 'bullet');
+  show('rf-g-flujos', m === 'flujos');
+  show('rf-g-manual', m === 'manual');
+}
+async function guardarRfParams(fundId, ticker) {
+  const g = id => document.getElementById('rf-' + id)?.value?.trim() ?? '';
+  const num = id => {
+    let x = g(id).replace(/\s/g, '');
+    if (x === '') return null;
+    if (x.includes(',')) x = x.replace(/\./g, '').replace(',', '.');   // formato 1.234,56
+    const n = parseFloat(x);
+    return isFinite(n) ? n : null;
+  };
+  const err = document.getElementById('rf-err');
+  const metodo = g('metodo');
+  const row = { fund_id: fundId, ticker, metodo, moneda_flujos: g('mon'),
+    vencimiento: null, cupon: null, frecuencia: null, valor_final: null, flujos: null, tir_manual: null, md_manual: null,
+    updated_at: new Date().toISOString() };
+  if (metodo === 'cero' || metodo === 'bullet') { row.vencimiento = g('vto') || null; row.valor_final = num('vf') ?? 1; }
+  if (metodo === 'bullet') {
+    row.cupon = num('cupon'); row.frecuencia = parseInt(g('freq'), 10);
+    if (row.cupon == null) { err.textContent = 'Falta el cupón.'; return; }
+  }
+  if (metodo === 'flujos') {
+    const fl = [];
+    for (const ln of g('flujos').split(/\n/).map(x => x.trim()).filter(Boolean)) {
+      const mm = ln.match(/^(\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2})\s*[;\t]\s*([\d.,]+)$/);
+      if (!mm) { err.textContent = 'Línea inválida: "' + ln + '". Formato: dd/mm/aaaa ; monto'; return; }
+      const fecha = mm[1].includes('/') ? fechaPDFaISO(mm[1]) : mm[1];
+      fl.push({ fecha, monto: mm[2].includes(',') ? parseArNum(mm[2]) : parseFloat(mm[2]) });
+    }
+    if (!fl.length) { err.textContent = 'Cargá al menos un flujo.'; return; }
+    row.flujos = fl.sort((a, b) => a.fecha.localeCompare(b.fecha));
+  }
+  if (metodo === 'manual') {
+    row.tir_manual = num('tir'); row.md_manual = num('md');
+    if (row.tir_manual == null && row.md_manual == null) { err.textContent = 'Cargá la TIR, la duration o las dos.'; return; }
+  }
+  try {
+    const r = await fetch(`${SB_URL}/renta_fija_params?on_conflict=fund_id,ticker`, {
+      method: 'POST',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(row),
+    });
+    if (!r.ok) throw new Error('Supabase ' + r.status + (r.status === 404 ? ' (¿corriste herramientas.sql?)' : ''));
+    (state.rfParams[fundId] = state.rfParams[fundId] || {})[ticker] = row;
+    closeModal(); render();
+  } catch (e) { err.textContent = 'No se pudo guardar: ' + e.message; }
+}
+async function borrarRfParams(fundId, ticker) {
+  await fetch(`${SB_URL}/renta_fija_params?fund_id=eq.${fundId}&ticker=eq.${encodeURIComponent(ticker)}`, { method: 'DELETE', headers: SB_HDR }).catch(() => {});
+  if (state.rfParams[fundId]) delete state.rfParams[fundId][ticker];
+  closeModal(); render();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// CALENDARIO DE VENCIMIENTOS
+// ═══════════════════════════════════════════════════════════════════
+// Eventos:
+//   · Renta fija con flujos (configurados o automáticos): cada cupón / amortización / vencimiento,
+//     importe = nominales × flujo por 1 de nominal (moneda de los flujos → moneda del fondo).
+//   · Renta fija sin flujos pero con vencimiento en el PDF: un evento al vencimiento por el valor actual (estimado).
+//   · Opciones abiertas (puts y calls vendidos): vencimiento con la caja que se mueve si las ejercen.
+const VENC_HORIZONTES = [['30', '30 días'], ['90', '90 días'], ['180', '6 meses'], ['365', '1 año'], ['todo', 'Todo']];
+
+function eventosVencimiento(fundId, conOpciones) {
+  const hoy = fechaArgISO();
+  const pn  = calcNAV(fundId).pn;
+  const ev  = [];
+  for (const f of calcRentaFija(fundId)) {
+    const nominales = f.h.cantidad;
+    if (f.flujos.length && f.fac) {
+      for (const x of f.flujos) {
+        const imp = nominales * x.monto;
+        ev.push({ fecha: x.fecha, ticker: f.ticker, clase: 'rf', tipo: x.tipo === 'vto' ? 'Vencimiento' : 'Cupón / amortización',
+                  detalle: f.tipo, importeOrig: imp, monOrig: f.monFl, importe: imp * f.fac, estimado: false });
+      }
+    } else if (f.vto && f.vto >= hoy) {
+      ev.push({ fecha: f.vto, ticker: f.ticker, clase: 'rf', tipo: 'Vencimiento', detalle: f.tipo,
+                importeOrig: null, monOrig: null, importe: f.valor, estimado: true });
+    }
+  }
+  if (conOpciones) {
+    for (const o of (state.opciones[fundId] || []).filter(o => o.estado !== 'CERRADA')) {
+      const c = calcOpcion(o);
+      ev.push({ fecha: o.vencimiento, ticker: o.papel, clase: 'opcion',
+                tipo: (c.isPut ? 'Vence PUT' : 'Vence CALL') + ' ' + f2(c.K),
+                detalle: fNum(c.E) + ' acciones · ' + (c.itm == null ? 'sin precio' : c.itm ? 'ejercible hoy' : 'fuera del dinero'),
+                itm: c.itm, importeOrig: null, monOrig: null,
+                // Caja si la ejercen: PUT = pagás strike (−), CALL = cobrás strike (+)
+                importe: c.isPut ? -c.E * c.K : c.E * c.K, vencida: c.dias != null && c.dias < 0 });
+    }
+  }
+  ev.forEach(e => { e.dias = diasEntre(hoy, e.fecha); e.peso = pn > 0 ? e.importe / pn : null; });
+  return ev.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.ticker.localeCompare(b.ticker));
+}
+
+function renderVencimientos(fundId) {
+  const V = state.vencVista || (state.vencVista = { horizonte: '90', opciones: true });
+  const todos = eventosVencimiento(fundId, V.opciones);
+  const lim = V.horizonte === 'todo' ? Infinity : +V.horizonte;
+  const vencidas = todos.filter(e => e.vencida);
+  const lista = todos.filter(e => !e.vencida && e.dias >= 0 && e.dias <= lim);
+  const MES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  const sumRf = (l) => l.filter(e => e.clase === 'rf').reduce((s, e) => s + e.importe, 0);
+  const prox = d => sumRf(todos.filter(e => !e.vencida && e.dias >= 0 && e.dias <= d));
+  const optEnRango = lista.filter(e => e.clase === 'opcion');
+  const putsItm = optEnRango.filter(e => e.importe < 0 && e.itm).reduce((s, e) => s + e.importe, 0);
+  const sinFlujos = calcRentaFija(fundId).filter(f => !f.flujos.length && f.p?.metodo !== 'manual').length;
+
+  const tiles = `
+    <div style="display:flex;gap:26px;flex-wrap:wrap">
+      ${statTile('Cobros próximos 30 días', fMon(fundId, prox(30)), 'renta fija')}
+      ${statTile('Cobros próximos 90 días', fMon(fundId, prox(90)), 'renta fija')}
+      ${statTile('Cobros en el horizonte', fMon(fundId, sumRf(lista)), lista.filter(e => e.clase === 'rf').length + ' eventos')}
+      ${V.opciones ? statTile('Opciones que vencen', String(optEnRango.length), putsItm < 0 ? fMon(fundId, putsItm) + ' en puts ejercibles' : 'ningún put ejercible', putsItm < 0 ? '#F59E0B' : null) : ''}
+    </div>
+    ${sinFlujos ? `<div style="font-size:12px;color:#5A5A60;margin-top:12px">${sinFlujos} instrumento${sinFlujos > 1 ? 's' : ''} de renta fija sin flujos configurados: figuran solo al vencimiento y por su valor actual (marcados “estimado”). Configuralos en la pestaña Renta fija para ver cupones y amortizaciones.</div>` : ''}`;
+
+  // Barras por mes (solo renta fija)
+  const porMes = {};
+  for (const e of lista.filter(e => e.clase === 'rf')) porMes[e.fecha.slice(0, 7)] = (porMes[e.fecha.slice(0, 7)] || 0) + e.importe;
+  const meses = Object.entries(porMes).sort();
+  const maxMes = Math.max(...meses.map(([, v]) => v), 1);
+  const barras = meses.length ? `
+    <div style="display:flex;align-items:flex-end;gap:10px;height:150px;padding-top:18px">
+      ${meses.map(([k, v]) => `
+        <div style="flex:1;min-width:34px;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%" title="${MES[+k.slice(5) - 1]} ${k.slice(0, 4)}: ${fMon(fundId, v)}">
+          <div style="font-size:10px;color:#9A9AA0;font-family:'JetBrains Mono',monospace;margin-bottom:4px;white-space:nowrap">${_ar0.format(Math.round(v / 1000))}k</div>
+          <div style="width:100%;max-width:46px;height:${Math.max(2, v / maxMes * 100)}px;background:#A6E635;border-radius:4px 4px 0 0"></div>
+          <div style="font-size:11px;color:#5A5A60;margin-top:6px">${MES[+k.slice(5) - 1].slice(0, 3)} ${k.slice(2, 4)}</div>
+        </div>`).join('')}
+    </div>` : '<div style="color:#5A5A60;font-size:13px">Sin cobros de renta fija en el horizonte.</div>';
+
+  // Tabla agrupada por mes
+  const fila = e => `
+    <tr${e.clase === 'opcion' ? ' style="background:rgba(56,189,248,0.04)"' : ''}>
+      <td class="num">${fDiaHist(e.fecha, true)}</td>
+      <td class="num" style="color:${e.dias <= 7 ? '#F59E0B' : '#9A9AA0'}">${e.dias < 0 ? 'vencida' : e.dias + ' d'}</td>
+      <td><span class="ticker-chip">${e.ticker}</span></td>
+      <td>${e.tipo}${e.estimado ? ' <span style="font-size:10px;color:#5A5A60">(estimado: valor actual)</span>' : ''}
+        <span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">${e.detalle || ''}</span></td>
+      <td class="num">${e.importeOrig != null && e.monOrig !== (FUNDS_CONFIG[fundId]?.moneda === 'USD' ? 'USD' : 'ARS') ? (e.monOrig === 'ARS' ? '$ ' : e.monOrig + ' ') + _ar0.format(Math.round(e.importeOrig)) : ''}</td>
+      <td class="num" style="font-weight:700;color:${e.clase === 'opcion' ? (e.importe < 0 ? '#D33A3F' : '#2E9E2A') : '#E5E5E7'}">${fMon(fundId, e.importe)}${e.clase === 'opcion' ? '<span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px;font-weight:400">si la ejercen</span>' : ''}</td>
+      <td class="num" style="color:#9A9AA0">${e.peso != null ? f2(e.peso * 100) + '%' : '—'}</td>
+      <td>${e.clase === 'opcion' ? (e.itm ? '<span style="padding:1px 6px;border-radius:5px;font-size:10px;font-weight:700;background:#F59E0B22;color:#F59E0B;border:1px solid #F59E0B55">EJERCIBLE</span>' : '') : ''}</td>
+    </tr>`;
+  let tbody = '', mesAct = '';
+  for (const e of lista) {
+    const k = e.fecha.slice(0, 7);
+    if (k !== mesAct) {
+      mesAct = k;
+      const l = lista.filter(x => x.fecha.slice(0, 7) === k);
+      tbody += `<tr><td colspan="8" style="padding-top:14px;font-size:11px;font-weight:800;color:#A6E635;text-transform:uppercase;letter-spacing:0.5px">
+        ${MES[+k.slice(5) - 1]} ${k.slice(0, 4)} <span style="color:#5A5A60;font-weight:600;text-transform:none;letter-spacing:0"> · cobros ${fMon(fundId, sumRf(l))}${l.some(x => x.clase === 'opcion') ? ' · ' + l.filter(x => x.clase === 'opcion').length + ' opciones' : ''}</span></td></tr>`;
+    }
+    tbody += fila(e);
+  }
+  const head = `<thead><tr><th class="num">Fecha</th><th class="num">Faltan</th><th>Activo</th><th>Evento</th><th class="num">Moneda orig.</th><th class="num">Importe</th><th class="num">% PN</th><th></th></tr></thead>`;
+  const tabla = `<div class="table-wrap"><table>${head}<tbody>${tbody || '<tr><td colspan="8" style="color:#5A5A60">Sin eventos en el horizonte elegido.</td></tr>'}</tbody></table></div>`;
+  const tablaVencidas = vencidas.length ? panel('Opciones vencidas sin cerrar', `
+    <div style="font-size:12px;color:#5A5A60;margin-bottom:8px">Siguen abiertas en el panel de opciones aunque ya vencieron: cerralas o actualizá el vencimiento.</div>
+    <div class="table-wrap"><table>${head}<tbody>${vencidas.map(fila).join('')}</tbody></table></div>`) : '';
+
+  const controles = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${VENC_HORIZONTES.map(([k, l]) => pillBtn(V.horizonte === k, l, `state.vencVista.horizonte='${k}';render()`)).join('')}</div>
+      ${pillBtn(V.opciones, (V.opciones ? '✓ ' : '') + 'Incluir opciones', 'state.vencVista.opciones=!state.vencVista.opciones;render()')}
+    </div>`;
+  return renderToolPage(fundId, 'venc', '', controles + panel('Resumen', tiles) + panel('Cobros por mes · renta fija', barras) + tablaVencidas + tabla);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// RESULTADO VS COSTO
+// ═══════════════════════════════════════════════════════════════════
+// Costo = "Precio inicial" del panel de Activos (misma escala que el precio de la tabla:
+// por lámina, en moneda del fondo). Es el mismo dato que usa la columna "Var. hist." de la cartera.
+// Resultado = nominales × (precio actual − costo) / lámina   (al revés en posiciones vendidas).
+// El costo del PDF (columna "Costo") se muestra de referencia y sirve para completar los vacíos.
+function calcResultadoCosto(fundId) {
+  const pn = calcNAV(fundId).pn;
+  return valuarTenencias(fundId).filter(v => v.m?.tipo !== 'Futuro de Dólar').map(v => {
+    const piDisp   = v.m?.precioInicial > 0 ? v.m.precioInicial : null;     // por lámina
+    const precioU  = v.price / v.lamina;                                    // por unidad
+    const costoU   = piDisp != null ? piDisp / v.lamina : null;
+    const costoPdf = v.h.costo > 0 ? v.h.costo : null;                      // por unidad (PDF)
+    const sg = v.corto ? -1 : 1;
+    const resultado = costoU != null ? sg * v.h.cantidad * (precioU - costoU) : null;
+    const varPct = costoU > 0 ? (v.corto ? costoU / precioU - 1 : precioU / costoU - 1) : null;
+    const difPdf = costoU && costoPdf ? costoU / costoPdf - 1 : null;
+    return { ...v, precioU, costoU, costoPdf, difPdf, resultado, varPct,
+             costoTotal: costoU != null ? sg * v.h.cantidad * costoU : null, peso: pn > 0 ? v.monto / pn : 0 };
+  });
+}
+
+function renderResultadoCosto(fundId) {
+  const C = state.costoVista || (state.costoVista = { grupo: 'activo', orden: 'resultado' });
+  const filas = calcResultadoCosto(fundId);
+  const con = filas.filter(f => f.resultado != null);
+  const res = con.reduce((s, f) => s + f.resultado, 0);
+  const costoTot = con.reduce((s, f) => s + f.costoTotal, 0);
+  const valorCon = con.reduce((s, f) => s + f.monto, 0);
+  const valorTot = filas.reduce((s, f) => s + Math.abs(f.monto), 0);
+  const faltan = filas.filter(f => f.costoU == null);
+  const completables = faltan.filter(f => f.costoPdf);
+  const pos = con.filter(f => f.resultado > 0), neg = con.filter(f => f.resultado < 0);
+
+  const tiles = `
+    <div style="display:flex;gap:26px;flex-wrap:wrap">
+      ${statTile('Resultado no realizado', fMon(fundId, res), costoTot ? fPct(res / costoTot) + ' sobre el costo' : '', colorSigno(res))}
+      ${statTile('Costo', fMon(fundId, costoTot), 'de las posiciones con costo')}
+      ${statTile('Valor actual', fMon(fundId, valorCon), 'de las mismas posiciones')}
+      ${statTile('Ganadoras / perdedoras', pos.length + ' / ' + neg.length, fMon(fundId, pos.reduce((s, f) => s + f.resultado, 0)) + ' / ' + fMon(fundId, neg.reduce((s, f) => s + f.resultado, 0)))}
+      ${statTile('Con costo cargado', valorTot ? f2(con.reduce((s, f) => s + Math.abs(f.monto), 0) / valorTot * 100) + '%' : '—', faltan.length ? faltan.length + ' activos sin costo' : 'todos los activos', faltan.length ? '#F59E0B' : '#2E9E2A')}
+    </div>
+    ${completables.length ? `
+    <div style="margin-top:14px;padding:10px 14px;border-radius:8px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-size:12px;color:#E5E5E7">${completables.length} activo${completables.length > 1 ? 's' : ''} sin costo en el panel de Activos tiene${completables.length > 1 ? 'n' : ''} costo en el PDF.</span>
+      <button class="btn-primary" style="padding:6px 12px;font-size:12px" onclick="completarCostosPDF('${fundId}')">Completar con el costo del PDF</button>
+    </div>` : ''}`;
+
+  // Agrupado
+  let cuerpoTabla;
+  if (C.grupo === 'activo') {
+    const ord = [...filas].sort((a, b) => C.orden === 'var' ? (b.varPct ?? -1e9) - (a.varPct ?? -1e9)
+                                         : C.orden === 'peso' ? b.monto - a.monto
+                                         : (b.resultado ?? -1e18) - (a.resultado ?? -1e18));
+    cuerpoTabla = `
+      <thead><tr><th>Activo</th><th class="num">Nominales</th><th class="num">Costo</th><th class="num">Costo PDF</th><th class="num">Precio</th>
+        <th class="num">Var. %</th><th class="num">Resultado</th><th class="num">Valor</th><th class="num">% PN</th><th></th></tr></thead>
+      <tbody>${ord.map(f => `
+        <tr>
+          <td><span class="ticker-chip">${f.ticker}</span><span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">${f.tipo}${f.corto ? ' · vendida' : ''}</span></td>
+          <td class="num">${fNum(f.h.cantidad)}</td>
+          <td class="num">${f.costoU != null ? f4(f.costoU) : '<span style="color:#F59E0B">sin costo</span>'}</td>
+          <td class="num" style="color:${f.difPdf != null && Math.abs(f.difPdf) > 0.02 ? '#F59E0B' : '#5A5A60'}" title="${f.difPdf != null && Math.abs(f.difPdf) > 0.02 ? 'Difiere ' + fPct(f.difPdf) + ' del costo cargado' : ''}">${f.costoPdf != null ? f4(f.costoPdf) : '—'}</td>
+          <td class="num">${f4(f.precioU)}${f.live ? ' <span class="badge badge-live">LIVE</span>' : ''}</td>
+          <td class="num" style="color:${colorSigno(f.varPct)}">${f.varPct != null ? fPct(f.varPct) : '—'}</td>
+          <td class="num" style="font-weight:700;color:${colorSigno(f.resultado)}">${f.resultado != null ? fMon(fundId, f.resultado) : '—'}</td>
+          <td class="num">${fMon(fundId, f.monto)}</td>
+          <td class="num" style="color:#9A9AA0">${f2(f.peso * 100)}%</td>
+          <td><button onclick="abrirCosto('${fundId}','${f.ticker}')" title="Editar costo" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#C0C0C8;padding:3px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit">✎</button></td>
+        </tr>`).join('')}</tbody>
+      <tfoot><tr style="border-top:1px solid rgba(255,255,255,0.12);font-weight:800">
+        <td colspan="6">Total (con costo)</td><td class="num" style="color:${colorSigno(res)}">${fMon(fundId, res)}</td><td class="num">${fMon(fundId, valorCon)}</td><td colspan="2"></td>
+      </tr></tfoot>`;
+  } else {
+    const key = f => C.grupo === 'tipo' ? f.tipo : C.grupo === 'moneda' ? f.moneda : f.cat;
+    const g = {};
+    for (const f of filas) {
+      const k = key(f);
+      const e = g[k] = g[k] || { k, res: 0, costo: 0, valorCon: 0, valor: 0, n: 0, sin: 0 };
+      e.valor += f.monto; e.n++;
+      if (f.resultado != null) { e.res += f.resultado; e.costo += f.costoTotal; e.valorCon += f.monto; } else e.sin++;
+    }
+    const gl = Object.values(g).sort((a, b) => b.res - a.res);
+    cuerpoTabla = `
+      <thead><tr><th>${{ tipo: 'Tipo', moneda: 'Moneda', cat: 'Categoría' }[C.grupo]}</th><th class="num">Costo</th><th class="num">Valor</th>
+        <th class="num">Resultado</th><th class="num">Var. %</th><th class="num">Sin costo</th></tr></thead>
+      <tbody>${gl.map(e => `
+        <tr><td>${e.k} <span style="color:#5A5A60;font-size:11px">(${e.n})</span></td>
+          <td class="num">${fMon(fundId, e.costo)}</td><td class="num">${fMon(fundId, e.valorCon)}</td>
+          <td class="num" style="font-weight:700;color:${colorSigno(e.res)}">${fMon(fundId, e.res)}</td>
+          <td class="num" style="color:${colorSigno(e.res)}">${e.costo ? fPct(e.res / e.costo) : '—'}</td>
+          <td class="num" style="color:${e.sin ? '#F59E0B' : '#5A5A60'}">${e.sin || '—'}</td></tr>`).join('')}</tbody>`;
+  }
+  const extra = `<div style="display:flex;gap:6px;flex-wrap:wrap">
+    ${[['activo','Activo'],['tipo','Tipo'],['moneda','Moneda'],['cat','Categoría']].map(([k,l]) => pillBtn(C.grupo === k, l, `state.costoVista.grupo='${k}';render()`)).join('')}
+    ${C.grupo === 'activo' ? '<span style="width:10px"></span>' + [['resultado','Por resultado'],['var','Por var. %'],['peso','Por valor']].map(([k,l]) => pillBtn(C.orden === k, l, `state.costoVista.orden='${k}';render()`)).join('') : ''}
+  </div>`;
+  const nota = `<div style="font-size:12px;color:#5A5A60;margin-bottom:10px">El costo es el “Precio inicial” del panel de Activos, por unidad y en moneda del fondo: es el mismo que usa la columna “Var. hist.” de la cartera. La columna “Costo PDF” es la que informa el PDF; si difiere más de 2% se marca en naranja.</div>`;
+  return renderToolPage(fundId, 'costo', '', panel('Resultado no realizado', tiles) + panel('Detalle', nota + `<div class="table-wrap"><table>${cuerpoTabla}</table></div>`, extra));
+}
+
+async function patchPrecioInicial(fundId, ticker, precioInicial) {
+  const r = await fetch(`${SB_URL}/${ACTIVOS_TABLE[fundId]}?ticker=eq.${encodeURIComponent(ticker)}`, {
+    method: 'PATCH',
+    headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+    body: JSON.stringify({ precio_inicial: precioInicial }),
+  });
+  if (!r.ok) throw new Error('Supabase ' + r.status);
+}
+
+async function completarCostosPDF(fundId) {
+  const lista = calcResultadoCosto(fundId).filter(f => f.costoU == null && f.costoPdf);
+  showModal(`<div class="modal-box" style="max-width:340px;padding:40px;text-align:center"><div class="spinner" style="margin:0 auto 16px"></div>
+    <div style="color:#9A9AA0;font-size:14px;font-weight:600">Guardando ${lista.length} costos…</div></div>`);
+  let ok = 0;
+  for (const f of lista) {
+    try { await patchPrecioInicial(fundId, f.ticker, f.costoPdf * f.lamina); ok++; } catch (e) { console.warn('[iEB] costo', f.ticker, e.message); }
+  }
+  state.meta = await cargarMeta();
+  closeModal(); render();
+  if (ok < lista.length) showModal(`<div class="modal-box" style="max-width:380px;padding:28px"><div style="font-weight:700;margin-bottom:8px">Se guardaron ${ok} de ${lista.length}</div>
+    <div style="color:#9A9AA0;font-size:13px;margin-bottom:16px">Los que faltan probablemente no están dados de alta en el panel de Activos.</div><button class="btn-secondary" onclick="closeModal()">Cerrar</button></div>`);
+}
+
+function abrirCosto(fundId, ticker) {
+  const f = calcResultadoCosto(fundId).find(x => x.ticker === ticker);
+  if (!f) return;
+  showModal(`
+    <div class="modal-box" style="max-width:400px">
+      <div class="modal-header"><div style="font-size:16px;font-weight:800">Costo de ${ticker}</div>
+        <button onclick="closeModal()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:18px">✕</button></div>
+      <div class="modal-body" style="display:grid;gap:10px">
+        <div style="font-size:12px;color:#9A9AA0">Precio actual por unidad: <strong style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${f4(f.precioU)}</strong>
+          ${f.costoPdf ? `<br>Costo según PDF: <strong style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${f4(f.costoPdf)}</strong>` : ''}</div>
+        <div><div style="font-size:11px;color:#9A9AA0;margin-bottom:4px;font-weight:600">Costo por unidad (moneda del fondo)</div>
+          <input id="co-val" type="number" step="any" class="cms-input" style="width:100%;box-sizing:border-box;font-family:'JetBrains Mono',monospace" value="${f.costoU ?? f.costoPdf ?? ''}"></div>
+        <div style="font-size:11px;color:#5A5A60">Se guarda como “Precio inicial” en el panel de Activos${f.lamina !== 1 ? ' (× lámina ' + f.lamina + ')' : ''}.</div>
+        <div id="co-err" style="color:#D33A3F;font-size:12px;font-weight:600"></div>
+      </div>
+      <div class="modal-footer"><button class="btn-secondary" onclick="closeModal()">Cancelar</button>
+        <button class="btn-primary" onclick="guardarCosto('${fundId}','${ticker}',${f.lamina})">💾 Guardar</button></div>
+    </div>`);
+}
+async function guardarCosto(fundId, ticker, lamina) {
+  const v = parseFloat((document.getElementById('co-val')?.value || '').replace(',', '.'));
+  const err = document.getElementById('co-err');
+  if (!(v > 0)) { err.textContent = 'Ingresá un costo mayor a cero.'; return; }
+  try { await patchPrecioInicial(fundId, ticker, v * lamina); state.meta = await cargarMeta(); closeModal(); render(); }
+  catch (e) { err.textContent = 'No se pudo guardar: ' + e.message + ' (¿el activo está dado de alta en Activos?)'; }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// CONCENTRACIÓN Y LÍMITES
+// ═══════════════════════════════════════════════════════════════════
+// Pesos = exposición / patrimonio, igual que la columna "% PN" de la cartera
+// (opciones vendidas por su nocional, liquidez neta de la reserva por opciones).
+// "Disponibilidades y otros" = patrimonio − tenencias (ajustes del PDF y honorarios).
+const LIM_DIMS = [['tipo', 'Tipo'], ['moneda', 'Moneda'], ['categoria', 'Categoría']];
+
+function itemsExposicion(fundId) {
+  const pn = calcNAV(fundId).pn;
+  const fondoMon = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
+  const items = calcMontosCartera(fundId).filter(i => i.meta?.tipo !== 'Futuro de Dólar').map(i => ({
+    ticker: i.ticker, monto: i.montoDisplay,
+    tipo: i._isCoveredCall ? 'Covered Call' : (i.meta?.tipo || 'Otros'),
+    categoria: i.meta?.categoria || 'Sin categoría', moneda: i.meta?.moneda || fondoMon,
+    liq: esLiquidez(i.meta),
+  }));
+  const resto = pn - items.reduce((s, i) => s + i.monto, 0);
+  if (Math.abs(resto) > 0.5) items.push({ ticker: 'Disponibilidades y otros', monto: resto, tipo: 'Liquidez', categoria: 'Liquidez', moneda: fondoMon, liq: true, _otros: true });
+  return { items, pn };
+}
+
+function pesosDe(items, pn) {
+  const out = { activo: {}, tipo: {}, moneda: {}, categoria: {}, liquidez: 0 };
+  if (!(pn > 0)) return out;
+  for (const i of items) {
+    const w = i.monto / pn;
+    if (!i._otros) out.activo[i.ticker] = (out.activo[i.ticker] || 0) + w;
+    out.tipo[i.tipo] = (out.tipo[i.tipo] || 0) + w;
+    out.moneda[i.moneda] = (out.moneda[i.moneda] || 0) + w;
+    out.categoria[i.categoria] = (out.categoria[i.categoria] || 0) + w;
+    if (i.liq) out.liquidez += w;
+  }
+  return out;
+}
+
+function getLimite(fundId, tipo, clave = '') {
+  return (state.limites[fundId] || []).find(l => l.tipo === tipo && l.clave === clave) || null;
+}
+
+function evaluarLimites(fundId, pesos) {
+  const res = [];
+  const gen = getLimite(fundId, 'general_activo')?.max ?? null;
+  const est = (peso, lim) => lim == null ? 'sin' : (peso > lim / 100 + 1e-9 ? 'excedido' : peso >= 0.9 * lim / 100 ? 'cerca' : 'ok');
+  for (const [k, w] of Object.entries(pesos.activo)) {
+    const esp = getLimite(fundId, 'activo', k)?.max ?? null;
+    const lim = esp ?? gen;
+    res.push({ dim: 'activo', clave: k, peso: w, limite: lim, especifico: esp != null, estado: est(Math.abs(w), lim) });
+  }
+  for (const [dim] of LIM_DIMS) {
+    for (const [k, w] of Object.entries(pesos[dim])) {
+      const lim = getLimite(fundId, dim, k)?.max ?? null;
+      res.push({ dim, clave: k, peso: w, limite: lim, especifico: lim != null, estado: est(Math.abs(w), lim) });
+    }
+  }
+  const lmin = getLimite(fundId, 'liquidez_min')?.min ?? null;
+  if (lmin != null) {
+    const w = pesos.liquidez;
+    res.push({ dim: 'liquidez', clave: 'Liquidez mínima', peso: w, limite: lmin, minimo: true,
+               estado: w < lmin / 100 - 1e-9 ? 'excedido' : w < lmin / 100 * 1.1 ? 'cerca' : 'ok' });
+  }
+  return res;
+}
+
+function alertasConcentracion(fundId) {
+  if (!FUNDS_CONFIG[fundId]) return [];
+  const { items, pn } = itemsExposicion(fundId);
+  return evaluarLimites(fundId, pesosDe(items, pn)).filter(a => a.estado === 'excedido' || a.estado === 'cerca');
+}
+
+async function guardarLimite(fundId, tipo, clave, valor) {
+  const txt = String(valor ?? '').trim().replace(',', '.');
+  const lista = (state.limites[fundId] = state.limites[fundId] || []);
+  const idx = lista.findIndex(l => l.tipo === tipo && l.clave === clave);
+  try {
+    if (txt === '') {
+      await fetch(`${SB_URL}/limites?fund_id=eq.${fundId}&tipo=eq.${tipo}&clave=eq.${encodeURIComponent(clave)}`, { method: 'DELETE', headers: SB_HDR });
+      if (idx >= 0) lista.splice(idx, 1);
+    } else {
+      const n = parseFloat(txt);
+      if (!isFinite(n) || n < 0) return;
+      const row = { fund_id: fundId, tipo, clave, max_pct: tipo === 'liquidez_min' ? null : n, min_pct: tipo === 'liquidez_min' ? n : null, updated_at: new Date().toISOString() };
+      const r = await fetch(`${SB_URL}/limites?on_conflict=fund_id,tipo,clave`, {
+        method: 'POST', headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(row),
+      });
+      if (!r.ok) throw new Error('Supabase ' + r.status);
+      const l = { tipo, clave, max: row.max_pct, min: row.min_pct };
+      if (idx >= 0) lista[idx] = l; else lista.push(l);
+    }
+  } catch (e) { console.warn('[iEB] guardarLimite:', e.message); alert('No se pudo guardar el límite (¿corriste herramientas.sql?)'); }
+  render();
+}
+
+const ESTADO_UI = {
+  excedido: ['Excedido', '#D33A3F'], cerca: ['Cerca', '#F59E0B'], ok: ['OK', '#2E9E2A'], sin: ['Sin límite', '#5A5A60'],
+};
+function chipEstado(e, minimo) {
+  const [l, c] = ESTADO_UI[e];
+  const label = minimo && e === 'excedido' ? 'Debajo del mínimo' : l;
+  return e === 'sin' ? `<span style="font-size:11px;color:${c}">${label}</span>`
+    : `<span style="display:inline-block;padding:1px 7px;border-radius:5px;font-size:10px;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;white-space:nowrap">${label}</span>`;
+}
+function barraUso(peso, limite) {
+  if (limite == null || !(limite > 0)) return '';
+  const uso = Math.abs(peso) / (limite / 100);
+  const c = uso > 1 ? '#D33A3F' : uso >= 0.9 ? '#F59E0B' : '#2E9E2A';
+  return `<div style="width:110px;height:8px;background:#1E1E26;border-radius:4px;overflow:hidden;display:inline-block;vertical-align:middle">
+    <div style="width:${Math.min(100, uso * 100)}%;height:100%;background:${c};border-radius:4px"></div></div>
+    <span style="font-size:11px;color:#9A9AA0;font-family:'JetBrains Mono',monospace;margin-left:6px">${_ar0.format(Math.round(uso * 100))}%</span>`;
+}
+const inputLim = (fundId, tipo, clave, val, ph) => `<input type="number" step="any" min="0" value="${val ?? ''}" placeholder="${ph ?? '—'}"
+  onchange="guardarLimite('${fundId}','${tipo}','${String(clave).replace(/'/g, "\\'")}',this.value)"
+  class="cms-input" style="width:76px;padding:4px 6px;font-family:'JetBrains Mono',monospace;font-size:12px;text-align:right"> %`;
+
+function renderConcentracion(fundId) {
+  const K = state.concVista || (state.concVista = { dim: 'tipo' });
+  const { items, pn } = itemsExposicion(fundId);
+  const pesos = pesosDe(items, pn);
+  const ev = evaluarLimites(fundId, pesos);
+  const alertas = ev.filter(a => a.estado === 'excedido' || a.estado === 'cerca').sort((a, b) => (a.estado === 'excedido' ? 0 : 1) - (b.estado === 'excedido' ? 0 : 1));
+  const gen = getLimite(fundId, 'general_activo')?.max ?? null;
+  const lmin = getLimite(fundId, 'liquidez_min')?.min ?? null;
+  const dimLabel = { activo: 'Activo', tipo: 'Tipo', moneda: 'Moneda', categoria: 'Categoría', liquidez: 'Liquidez' };
+
+  const tiles = `
+    <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-end">
+      ${statTile('Excedidos', String(alertas.filter(a => a.estado === 'excedido').length), 'límites superados', alertas.some(a => a.estado === 'excedido') ? '#D33A3F' : '#2E9E2A')}
+      ${statTile('Cerca del límite', String(alertas.filter(a => a.estado === 'cerca').length), '90% o más del límite', alertas.some(a => a.estado === 'cerca') ? '#F59E0B' : null)}
+      <div><div class="metric-label">Límite general por activo</div><div style="margin-top:4px">${inputLim(fundId, 'general_activo', '', gen, 'sin límite')}</div>
+        <div style="font-size:11px;color:#5A5A60;margin-top:3px">aplica a los activos sin límite propio</div></div>
+      <div><div class="metric-label">Liquidez mínima</div><div style="margin-top:4px">${inputLim(fundId, 'liquidez_min', '', lmin, 'sin mínimo')}</div>
+        <div style="font-size:11px;color:#5A5A60;margin-top:3px">hoy ${f2(pesos.liquidez * 100)}% del patrimonio</div></div>
+    </div>`;
+
+  const listaAlertas = alertas.length ? alertas.map(a => `
+    <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+      ${chipEstado(a.estado, a.minimo)}
+      <span style="font-size:13px;color:#E5E5E7;font-weight:600">${a.clave}</span>
+      <span style="font-size:12px;color:#5A5A60">${dimLabel[a.dim]}</span>
+      <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:12px;color:#E5E5E7">${f2(a.peso * 100)}% <span style="color:#5A5A60">${a.minimo ? 'mín.' : 'lím.'} ${f2(a.limite)}%</span></span>
+    </div>`).join('') : '<div style="color:#2E9E2A;font-size:13px">Sin alertas: todo dentro de los límites cargados.</div>';
+
+  const filasActivo = ev.filter(a => a.dim === 'activo').sort((a, b) => Math.abs(b.peso) - Math.abs(a.peso)).map(a => `
+    <tr>
+      <td><span class="ticker-chip">${a.clave}</span><span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">${items.find(i => i.ticker === a.clave)?.tipo || ''}</span></td>
+      <td class="num" style="font-weight:700">${f2(a.peso * 100)}%</td>
+      <td class="num">${inputLim(fundId, 'activo', a.clave, a.especifico ? a.limite : null, gen != null ? f2(gen) : '—')}</td>
+      <td>${barraUso(a.peso, a.limite)}</td>
+      <td>${chipEstado(a.estado)}</td>
+    </tr>`).join('');
+
+  const filasDim = ev.filter(a => a.dim === K.dim).sort((a, b) => b.peso - a.peso).map(a => `
+    <tr><td>${a.clave}</td><td class="num" style="font-weight:700">${f2(a.peso * 100)}%</td>
+      <td class="num">${inputLim(fundId, K.dim, a.clave, a.limite, '—')}</td><td>${barraUso(a.peso, a.limite)}</td><td>${chipEstado(a.estado)}</td></tr>`).join('');
+  const thead = (c) => `<thead><tr><th>${c}</th><th class="num">Peso</th><th class="num">Límite máx.</th><th>Uso del límite</th><th>Estado</th></tr></thead>`;
+
+  const cuerpo = panel('Límites', tiles)
+    + panel('Alertas', listaAlertas)
+    + panel('Por ' + dimLabel[K.dim].toLowerCase(), `<div class="table-wrap"><table>${thead(dimLabel[K.dim])}<tbody>${filasDim}</tbody></table></div>`,
+        `<div style="display:flex;gap:6px">${LIM_DIMS.map(([k, l]) => pillBtn(K.dim === k, l, `state.concVista.dim='${k}';render()`)).join('')}</div>`)
+    + panel('Por activo', `<div style="font-size:12px;color:#5A5A60;margin-bottom:10px">El peso es la exposición sobre el patrimonio (opciones vendidas por su nocional). Dejá el límite vacío para usar el general.</div>
+        <div class="table-wrap"><table>${thead('Activo')}<tbody>${filasActivo}</tbody></table></div>`);
+  return renderToolPage(fundId, 'conc', '', cuerpo);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SIMULADOR DE OPERACIONES
+// ═══════════════════════════════════════════════════════════════════
+// Operaciones hipotéticas (no se guardan): compras y ventas a precio de mercado.
+//   Compra con fondeo "liquidez": sale de los activos de liquidez en proporción a su monto
+//     (si no alcanza, de "Disponibilidades y otros", que puede quedar negativo).
+//   Compra con "aporte": entra plata nueva → sube el patrimonio.
+//   Venta: el producido va a "Disponibilidades y otros" (o sale como rescate).
+function simOps(fundId) { return (state.sim = state.sim || {})[fundId] = state.sim[fundId] || []; }
+
+function simAplicar(fundId) {
+  const base = itemsExposicion(fundId);
+  const items = base.items.map(i => ({ ...i }));
+  let pn = base.pn;
+  const fondoMon = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
+  const otros = () => {
+    let o = items.find(i => i._otros);
+    if (!o) { o = { ticker: 'Disponibilidades y otros', monto: 0, tipo: 'Liquidez', categoria: 'Liquidez', moneda: fondoMon, liq: true, _otros: true }; items.push(o); }
+    return o;
+  };
+  const avisos = [];
+  for (const op of simOps(fundId)) {
+    let it = items.find(i => i.ticker === op.ticker && !i._otros);
+    if (!it) {
+      it = { ticker: op.ticker, monto: 0, tipo: op.tipo || 'Otros', categoria: op.categoria || 'Sin categoría', moneda: op.moneda || fondoMon, liq: op.categoria === 'Liquidez', _nuevo: true };
+      items.push(it);
+    }
+    let monto = op.monto;
+    if (op.accion === 'venta') {
+      if (monto > it.monto + 0.5) { avisos.push(`Venta de ${op.ticker} mayor a la tenencia: se limita a ${fMon(fundId, it.monto)}.`); monto = Math.max(0, it.monto); }
+      it.monto -= monto;
+      if (op.fondeo === 'rescate') pn -= monto; else otros().monto += monto;
+    } else {
+      it.monto += monto;
+      if (op.fondeo === 'aporte') pn += monto;
+      else {
+        const liq = items.filter(i => i.liq && !i._otros && i !== it && i.monto > 0);
+        const tot = liq.reduce((s, i) => s + i.monto, 0);
+        const deLiq = Math.min(monto, tot);
+        liq.forEach(i => { i.monto -= deLiq * i.monto / tot; });
+        if (monto - deLiq > 0.5) { otros().monto -= monto - deLiq; avisos.push(`No alcanza la liquidez para ${op.ticker}: ${fMon(fundId, monto - deLiq)} salen de disponibilidades.`); }
+      }
+    }
+  }
+  return { antes: base, despues: { items, pn }, avisos };
+}
+
+function renderSimulador(fundId) {
+  const S = state.simVista || (state.simVista = { dim: 'tipo' });
+  const ops = simOps(fundId);
+  const { antes, despues, avisos } = simAplicar(fundId);
+  const pA = pesosDe(antes.items, antes.pn), pD = pesosDe(despues.items, despues.pn);
+  const eA = evaluarLimites(fundId, pA), eD = evaluarLimites(fundId, pD);
+  const exc = l => l.filter(a => a.estado === 'excedido');
+  const meta = state.meta[fundId] || {};
+  const tickers = [...new Set((state.holdings[fundId] || []).map(h => h.ticker))].sort();
+
+  // ── Formulario
+  const form = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;align-items:end">
+      <div><div class="metric-label">Operación</div>
+        <select id="sim-acc" class="cms-select" style="width:100%" onchange="simActualizarForm('${fundId}')"><option value="compra">Compra</option><option value="venta">Venta</option></select></div>
+      <div><div class="metric-label">Activo</div>
+        <select id="sim-tk" class="cms-select" style="width:100%" onchange="simActualizarForm('${fundId}')">
+          ${tickers.map(t => `<option value="${t}">${t}</option>`).join('')}<option value="__nuevo">+ Activo nuevo…</option></select></div>
+      <div id="sim-nuevo" style="display:none;grid-column:1/-1;display:none">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px">
+          <div><div class="metric-label">Ticker nuevo</div><input id="sim-ntk" class="cms-input" style="width:100%;box-sizing:border-box" placeholder="ej: MSFT"></div>
+          <div><div class="metric-label">Tipo</div><input id="sim-ntipo" class="cms-input" style="width:100%;box-sizing:border-box" placeholder="ej: Equity USA" list="sim-tipos"></div>
+          <div><div class="metric-label">Categoría</div><input id="sim-ncat" class="cms-input" style="width:100%;box-sizing:border-box" placeholder="ej: Equity" list="sim-cats"></div>
+          <div><div class="metric-label">Moneda</div><select id="sim-nmon" class="cms-select" style="width:100%"><option>USD</option><option>ARS</option></select></div>
+        </div>
+        <datalist id="sim-tipos">${[...new Set(Object.values(meta).map(m => m.tipo))].map(t => `<option value="${t}">`).join('')}</datalist>
+        <datalist id="sim-cats">${[...new Set(Object.values(meta).map(m => m.categoria).filter(Boolean))].map(t => `<option value="${t}">`).join('')}</datalist>
+      </div>
+      <div><div class="metric-label">Monto (${FUNDS_CONFIG[fundId]?.moneda || 'ARS'})</div><input id="sim-monto" type="number" step="any" min="0" class="cms-input" style="width:100%;box-sizing:border-box;font-family:'JetBrains Mono',monospace" placeholder="ej: 500000"></div>
+      <div><div class="metric-label" id="sim-fondeo-lbl">Fondeo</div>
+        <select id="sim-fondeo" class="cms-select" style="width:100%"></select></div>
+      <div><button class="btn-primary" style="width:100%" onclick="simAgregar('${fundId}')">+ Agregar</button></div>
+    </div>
+    <div id="sim-err" style="color:#D33A3F;font-size:12px;font-weight:600;margin-top:6px"></div>
+    ${ops.length ? `
+    <div style="margin-top:14px;display:flex;flex-direction:column;gap:6px">
+      ${ops.map((o, i) => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:8px">
+          <span style="font-size:11px;font-weight:800;color:${o.accion === 'compra' ? '#2E9E2A' : '#D33A3F'};text-transform:uppercase;width:56px">${o.accion}</span>
+          <span class="ticker-chip">${o.ticker}</span>${o.nuevo ? '<span style="font-size:10px;color:#5A5A60">nuevo · ' + o.tipo + '</span>' : ''}
+          <span style="font-family:'JetBrains Mono',monospace;font-size:13px">${fMon(fundId, o.monto)}</span>
+          <span style="font-size:11px;color:#5A5A60">${{ liquidez: 'con liquidez', aporte: 'con aporte nuevo', liq: 'a disponibilidades', rescate: 'para rescate' }[o.fondeo]}</span>
+          <button onclick="simQuitar('${fundId}',${i})" style="margin-left:auto;background:none;border:none;color:#F87171;cursor:pointer;font-size:14px">✕</button>
+        </div>`).join('')}
+      <div><button class="btn-secondary" style="padding:5px 12px;font-size:12px" onclick="state.sim['${fundId}']=[];render()">Limpiar todo</button></div>
+    </div>` : '<div style="font-size:12px;color:#5A5A60;margin-top:12px">Agregá una o más operaciones para ver cómo queda la cartera. Nada de esto se guarda ni modifica la cartera real.</div>'}`;
+
+  // ── Resumen antes / después
+  const delta = (a, d, pct) => {
+    const x = d - a;
+    if (Math.abs(x) < (pct ? 5e-6 : 0.5)) return '<span style="color:#5A5A60">sin cambio</span>';
+    return `<span style="color:${x > 0 ? '#2E9E2A' : '#D33A3F'}">${x > 0 ? '+' : '−'}${pct ? f2(Math.abs(x) * 100) + ' pp' : fMon(fundId, Math.abs(x)).replace('−', '')}</span>`;
+  };
+  const tiles = `
+    <div style="display:flex;gap:28px;flex-wrap:wrap">
+      ${statTile('Patrimonio', fMon(fundId, despues.pn), 'antes ' + fMon(fundId, antes.pn) + ' · ' + delta(antes.pn, despues.pn))}
+      ${statTile('Liquidez', f2(pD.liquidez * 100) + '%', 'antes ' + f2(pA.liquidez * 100) + '% · ' + delta(pA.liquidez, pD.liquidez, true), pD.liquidez < 0 ? '#D33A3F' : null)}
+      ${statTile('Límites excedidos', String(exc(eD).length), 'antes ' + exc(eA).length, exc(eD).length > exc(eA).length ? '#D33A3F' : exc(eD).length ? '#F59E0B' : '#2E9E2A')}
+    </div>
+    ${avisos.length ? `<div style="margin-top:12px;font-size:12px;color:#F59E0B">${avisos.map(a => '⚠ ' + a).join('<br>')}</div>` : ''}`;
+
+  // ── Alertas nuevas / resueltas
+  const keyA = a => a.dim + '|' + a.clave;
+  const setA = new Set(exc(eA).map(keyA)), setD = new Set(exc(eD).map(keyA));
+  const nuevas = exc(eD).filter(a => !setA.has(keyA(a))), resueltas = exc(eA).filter(a => !setD.has(keyA(a)));
+  const alertasHtml = !nuevas.length && !resueltas.length ? '<div style="color:#9A9AA0;font-size:13px">Las operaciones no cambian el estado de los límites.</div>'
+    : [...nuevas.map(a => `<div style="font-size:13px;padding:4px 0"><span style="color:#D33A3F;font-weight:700">Nuevo exceso</span> · ${a.clave} <span style="color:#5A5A60">${f2(a.peso * 100)}% (${a.minimo ? 'mín.' : 'lím.'} ${f2(a.limite)}%)</span></div>`),
+       ...resueltas.map(a => `<div style="font-size:13px;padding:4px 0"><span style="color:#2E9E2A;font-weight:700">Se resuelve</span> · ${a.clave}</div>`)].join('');
+
+  // ── Composición antes / después
+  const dim = S.dim;
+  const claves = [...new Set([...Object.keys(pA[dim]), ...Object.keys(pD[dim])])]
+    .sort((a, b) => (pD[dim][b] || 0) - (pD[dim][a] || 0));
+  const estadoD = k => eD.find(a => a.dim === dim && a.clave === k);
+  const comp = `
+    <div class="table-wrap"><table>
+      <thead><tr><th>${{ activo: 'Activo', tipo: 'Tipo', moneda: 'Moneda', categoria: 'Categoría' }[dim]}</th><th class="num">Antes</th><th class="num">Después</th><th class="num">Cambio</th><th class="num">Límite</th><th>Estado después</th></tr></thead>
+      <tbody>${claves.filter(k => Math.abs(pA[dim][k] || 0) > 1e-6 || Math.abs(pD[dim][k] || 0) > 1e-6).map(k => {
+        const a = pA[dim][k] || 0, d = pD[dim][k] || 0, e = estadoD(k);
+        const cambio = Math.abs(d - a) > 5e-6;
+        return `<tr${cambio ? ' style="background:rgba(166,230,53,0.04)"' : ''}><td>${dim === 'activo' ? `<span class="ticker-chip">${k}</span>` : k}</td>
+          <td class="num" style="color:#9A9AA0">${f2(a * 100)}%</td><td class="num" style="font-weight:700">${f2(d * 100)}%</td>
+          <td class="num">${cambio ? delta(a, d, true) : ''}</td>
+          <td class="num" style="color:#9A9AA0">${e?.limite != null ? f2(e.limite) + '%' : '—'}</td><td>${e ? chipEstado(e.estado) : ''}</td></tr>`;
+      }).join('')}</tbody></table></div>`;
+
+  const cuerpo = panel('Operaciones hipotéticas', form)
+    + (ops.length ? panel('Resultado', tiles) + panel('Límites', alertasHtml) : '')
+    + panel('Composición antes / después', comp,
+        `<div style="display:flex;gap:6px">${[['tipo','Tipo'],['moneda','Moneda'],['categoria','Categoría'],['activo','Activo']].map(([k,l]) => pillBtn(dim === k, l, `state.simVista.dim='${k}';render()`)).join('')}</div>`);
+  const html = renderToolPage(fundId, 'sim', '', cuerpo);
+  setTimeout(() => simActualizarForm(fundId), 0);
+  return html;
+}
+
+function simActualizarForm(fundId) {
+  const acc = document.getElementById('sim-acc')?.value;
+  const tk  = document.getElementById('sim-tk')?.value;
+  const nuevo = document.getElementById('sim-nuevo');
+  if (!acc) return;
+  if (nuevo) nuevo.style.display = tk === '__nuevo' && acc === 'compra' ? '' : 'none';
+  const sel = document.getElementById('sim-fondeo');
+  const opts = acc === 'compra' ? [['liquidez', 'Con liquidez del fondo'], ['aporte', 'Con aporte nuevo']] : [['liq', 'A disponibilidades'], ['rescate', 'Para pagar un rescate']];
+  const actual = sel.value;
+  sel.innerHTML = opts.map(([k, l]) => `<option value="${k}" ${k === actual ? 'selected' : ''}>${l}</option>`).join('');
+  document.getElementById('sim-fondeo-lbl').textContent = acc === 'compra' ? 'Fondeo' : 'Destino';
+}
+
+function simAgregar(fundId) {
+  const g = id => document.getElementById(id)?.value?.trim() ?? '';
+  const err = document.getElementById('sim-err');
+  const accion = g('sim-acc');
+  let ticker = g('sim-tk');
+  const monto = parseFloat(g('sim-monto').replace(',', '.'));
+  if (!(monto > 0)) { err.textContent = 'Ingresá un monto mayor a cero.'; return; }
+  const op = { accion, ticker, monto, fondeo: g('sim-fondeo') };
+  if (ticker === '__nuevo') {
+    if (accion === 'venta') { err.textContent = 'Solo se puede vender un activo que está en cartera.'; return; }
+    ticker = g('sim-ntk').toUpperCase();
+    if (!ticker) { err.textContent = 'Poné el ticker del activo nuevo.'; return; }
+    Object.assign(op, { ticker, nuevo: true, tipo: g('sim-ntipo') || 'Otros', categoria: g('sim-ncat') || 'Sin categoría', moneda: g('sim-nmon') || 'USD' });
+  }
+  simOps(fundId).push(op);
+  render();
+}
+function simQuitar(fundId, i) { simOps(fundId).splice(i, 1); render(); }
+
+const TOOL_RENDER = {
+  venc:  renderVencimientos,
+  costo: renderResultadoCosto,
+  rf:    renderRentaFija,
+  conc:  renderConcentracion,
+  sim:   renderSimulador,
+};
+
+// ═══════════════════════════════════════════════════════════════════
 // ATRIBUCIÓN DE PERFORMANCE
 // ═══════════════════════════════════════════════════════════════════
 // Método (buy & hold entre cierres consecutivos):
@@ -1992,7 +3124,7 @@ async function guardarCierre(fundId, data) {
   if (!fecha) throw new Error('el PDF no tiene fecha legible');
   const row = {
     fund_id: fundId, fecha,
-    holdings: data.holdings.map(h => ({ ticker: h.ticker, cantidad: h.cantidad, cierre: h.cierre })),
+    holdings: data.holdings.map(h => ({ ticker: h.ticker, cantidad: h.cantidad, cierre: h.cierre, vencimiento: h.vencimiento || null })),
     ajustes: data.ajustes || [], nav: data.navCierre || null, cuotapartes: data.cuotapartes || null,
   };
   const r = await fetch(`${SB_URL}/cierres_fondo?on_conflict=fund_id,fecha`, {
@@ -2152,19 +3284,9 @@ function aplicarAtribCustom() {
 function renderAtribucion(fundId) {
   const cfg = FUNDS_CONFIG[fundId] || {};
   const A = state.atrib;
-  const head = `
-    ${renderTopBar({ showBack: false })}
-    <div class="fund-page">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px">
-        <div style="display:flex;align-items:center;gap:16px">
-          <button data-action="fund" class="back-btn">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#A6E635" stroke-width="2.6" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg>
-            Volver a cartera
-          </button>
-          <div style="font-size:18px;font-weight:800">${cfg.nombre || fundId} · Atribución de performance</div>
-        </div>
-        <label for="pdf-hist-input" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)">Cargar PDFs anteriores</label>
-      </div>`;
+  const head = renderToolPage(fundId, 'atrib',
+    `<label for="pdf-hist-input" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)">Cargar PDFs anteriores</label>`,
+    '').replace(/<\/div>\s*$/, '');
   if (A.loading || !A.cierres) return head + `<div class="center-msg" style="min-height:200px"><div class="spinner"></div><span>Cargando cierres…</span></div></div>`;
 
   const cierres = cierresFondo(fundId);
@@ -2364,7 +3486,7 @@ function renderFondo(fundId) {
   const holdings  = state.holdings[fundId] || [];
   const fondoMeta = state.meta[fundId] || {};
   const moneda    = cfg.moneda || 'ARS';
-  const pos = rend > 1e-5, neg = rend < -1e-5;
+  const pos = rend >= 5e-5, neg = rend <= -5e-5;
   const rendColor = pos ? '#A6E635' : (neg ? '#D33A3F' : '#9A9AA0');
   const enHorario = dentroHorarioMercado();
 
@@ -2493,7 +3615,8 @@ function renderFondo(fundId) {
         <td class="num">${f2(cierre)}</td>
         <td class="num">${f2(priceDisplay)} ${badge}</td>
         <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
-        <td class="num" style="color:${varHistColor}">${varHist !== null ? fPct(varHist) : '—'}</td>
+        <td class="num" style="color:${varHistColor}">${varHist !== null ? fPct(varHist) : '—'}${
+          precioInicial > 0 ? `<span style="font-size:10px;display:block;margin-top:2px;font-family:'JetBrains Mono',monospace">${fARS((isShortCall ? -1 : 1) * h.cantidad * (priceDisplay - precioInicial) / lamina)}</span>` : ''}</td>
         <td class="num">${fARS(montoTabla)}${
           SHORT_OPT_TIPOS.includes(tipo) && Math.abs(montoDisplay - montoTabla) > 0.5
             ? subNota('exposición ' + fARS(montoDisplay))
@@ -2551,6 +3674,7 @@ function renderFondo(fundId) {
         </div>
       </div>
 
+      ${renderTabs(fundId, 'fund')}
       ${renderHistorial(fundId)}
       ${fundId === 'CICLO_NOVA' || (state.opciones[fundId] || []).length ? renderOpciones(fundId) : ''}
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
@@ -2568,10 +3692,6 @@ function renderFondo(fundId) {
         </div>
         <!-- Right side buttons -->
         <div style="display:flex;gap:10px;align-items:center">
-        <button data-action="atrib" data-id="${fundId}" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>
-          Atribución
-        </button>
         <button data-action="activos" data-id="${fundId}" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="15" x2="12" y2="15"/></svg>
           Activos
@@ -3310,7 +4430,7 @@ async function init() {
   render(); // pantalla de carga
 
   try {
-    const [fundsConfig, meta, holdings, fxAyer, , historial, opciones] = await Promise.all([
+    const [fundsConfig, meta, holdings, fxAyer, , historial, opciones, limites, rfParams] = await Promise.all([
       cargarFunds(),
       cargarMeta(),
       cargarHoldings(),
@@ -3318,7 +4438,11 @@ async function init() {
       cargarCoveredCalls(),
       cargarHistorial(),
       cargarOpciones(),
+      cargarLimites(),
+      cargarRfParams(),
     ]);
+    state.limites  = limites;
+    state.rfParams = rfParams;
     state.historial = historial;
     state.opciones  = opciones;
     FUNDS_CONFIG   = fundsConfig;
@@ -3523,10 +4647,31 @@ async function parsePDF(arrayBuffer) {
     if (!line) continue;
     const nums = [...line.text.matchAll(numPat)];
     if (nums.length) {
-      // Usar el primer número de la línea (el valor); los siguientes son % del portfolio
-      const val = parseArNum(nums[0][0]) * sign;
-      res.ajustes.push({ label: key, val });
+      // Usar el primer número de la línea (el valor); los siguientes son % del portfolio.
+      // Un importe entre paréntesis es negativo: en los (−) se resta igual; en los (+) resta.
+      const absVal  = parseArNum(nums[0][0]);
+      const antes   = line.text.slice(0, nums[0].index).trimEnd();
+      const entreParentesis = antes.endsWith('(');
+      const val = sign < 0 ? -absVal : (entreParentesis ? -absVal : absVal);
+      res.ajustes.push({ label: entreParentesis && sign > 0 ? key.replace('(+)', '(−)') : key, val });
       console.log('[PDF ajuste]', key, '=', val);
+    }
+  }
+
+  // Ciclo Nova: conciliar contra "Valor Patrimonial del Fondo" para que PN = inversiones + ajustes
+  // exacto (el pasivo del PDF no siempre es igual a la suma de sus líneas).
+  if (isCicloNovaPDF) {
+    const lnPN  = lines.find(l => /valor patrimonial del fondo/i.test(l.text));
+    const lnInv = lines.find(l => /^INVERSIONES\b/.test(norm(l.text).trim()) && [...l.text.matchAll(numPat)].length);
+    if (lnPN && lnInv) {
+      const pnPDF  = parseArNum([...lnPN.text.matchAll(numPat)][0][0]);
+      const invPDF = parseArNum([...lnInv.text.matchAll(numPat)][0][0]);
+      const dif = pnPDF - invPDF - res.ajustes.reduce((s, a) => s + a.val, 0);
+      res.pnCierre = pnPDF;
+      if (Math.abs(dif) > 0.005) {
+        res.ajustes.push({ label: '(±) Otros (conciliación con PN del PDF)', val: Math.round(dif * 100) / 100 });
+        console.log('[PDF ajuste] conciliación =', dif);
+      }
     }
   }
 
@@ -3584,13 +4729,14 @@ async function parsePDF(arrayBuffer) {
     const t = line.text.trim();
     const nums = [...t.matchAll(numPat)].map(m => m[0]);
     let ticker = '', cierre = 0, cantidad = 0;
+    const extra = {};
 
     if (isCicloNova) {
       // ── Formato Ciclo Nova ────────────────────────────────────────
       // Ticker = primera palabra antes de " - "
       const dashIdx = t.indexOf(' - ');
       const firstPart = dashIdx > 0 ? t.substring(0, dashIdx) : t.split(' ')[0];
-      ticker = firstPart.trim().split(/\s+/)[0].replace(/^#/, '');
+      ticker = firstPart.trim().split(/\s+/)[0].replace(/^#/, '').replace(/-+$/, '');
       // Saltar filas de subtotales de sección (primer carácter es dígito)
       if (/^\d/.test(ticker) || /[,\.]/.test(ticker)) continue;
       // Saltar cauciones — tienen su propio parser dedicado
@@ -3601,6 +4747,15 @@ async function parsePDF(arrayBuffer) {
         cantidad = parseArNum(nums[0]);
         const total = parseArNum(nums[2]);
         cierre = cantidad > 0 && total > 0 ? total / cantidad : parseArNum(nums[1]);
+        // Costo: 5ª columna numérica (Cantidad | Cierre | Total | % | Costo | Var%). Entre paréntesis = dato roto del PDF
+        if (!t.startsWith('#') && nums.length >= 6) {
+          const mCosto = [...t.matchAll(numPat)][4];
+          const prev   = t.slice(0, mCosto.index).trimEnd();
+          if (!prev.endsWith('(')) extra.costo = parseArNum(mCosto[0]);
+        }
+        // Vencimiento: en cheques es la 1ª fecha (después viene la de compra); en el resto, la última
+        const fechas = [...t.matchAll(/\b(\d{1,2}\/\d{1,2}\/\d{4})\b/g)].map(m => m[1]);
+        if (fechas.length) extra.vencimiento = fechaPDFaISO(t.startsWith('#') ? fechas[0] : fechas[fechas.length - 1]);
       } else if (nums.length >= 2) {
         cantidad = parseArNum(nums[0]);
         cierre   = parseArNum(nums[1]);
@@ -3647,7 +4802,7 @@ async function parsePDF(arrayBuffer) {
 
     usedTickers.add(ticker);
     res.denomMap[ticker] = t.split(/[(\-]/)[0].trim().substring(0, 60);
-    res.holdings.push({ ticker, cierre, cantidad });
+    res.holdings.push({ ticker, cierre, cantidad, ...extra });
     console.log('[PDF] Holding:', ticker, '| cierre:', cierre, '| cant:', cantidad);
   }
 
@@ -3774,12 +4929,17 @@ async function confirmarCargaPDF() {
     if (!del.ok && del.status !== 404) throw new Error('Error borrando holdings: ' + del.status);
 
     // 2. Insertar nuevos
-    const newRows = data.holdings.map(h => ({ fund_id: fundId, ticker: h.ticker, cantidad: h.cantidad, cierre: h.cierre }));
-    const ins = await fetch(`${SB_URL}/holdings`, {
+    const newRows = data.holdings.map(h => ({ fund_id: fundId, ticker: h.ticker, cantidad: h.cantidad, cierre: h.cierre,
+                                              vencimiento: h.vencimiento || null, costo: h.costo ?? null }));
+    const postHold = rows => fetch(`${SB_URL}/holdings`, {
       method: 'POST',
       headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-      body: JSON.stringify(newRows),
+      body: JSON.stringify(rows),
     });
+    let ins = await postHold(newRows);
+    if (ins.status === 400) {   // todavía no existen las columnas vencimiento/costo
+      ins = await postHold(newRows.map(({ vencimiento, costo, ...r }) => r));
+    }
     if (!ins.ok) throw new Error('Error insertando holdings: ' + ins.status);
 
     // 3. Actualizar funds (nav, cuotapartes, fecha, ajustes)
@@ -3815,7 +4975,8 @@ async function confirmarCargaPDF() {
     if (data.ajustes && data.ajustes.length > 0) AJUSTES[fundId] = data.ajustes;
 
     // 5. Actualizar state.holdings
-    state.holdings[fundId] = data.holdings.map(h => ({ ticker: h.ticker, cantidad: h.cantidad, cierre: h.cierre }));
+    state.holdings[fundId] = data.holdings.map(h => ({ ticker: h.ticker, cantidad: h.cantidad, cierre: h.cierre,
+                                                       vencimiento: h.vencimiento || null, costo: h.costo ?? null }));
 
     // 6. Detectar tickers nuevos (no en activos_{fundId})
     const tabla = ACTIVOS_TABLE[fundId];
