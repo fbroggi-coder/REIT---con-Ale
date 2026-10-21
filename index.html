@@ -1755,16 +1755,15 @@ function renderOpciones(fundId) {
   }).join('');
 
   const totalCash = sum(x => x.c.cash);
-  const abierto    = state.optAbierto;
+  const abierto    = true;   // vive en su propia pestaña
   const nEjercibles = abiertas.filter(x => x.c.itm).length;
   const nVencidas   = abiertas.filter(x => x.c.dias != null && x.c.dias < 0).length;
   const btn = (label, onclick, primary) => `<button onclick="event.stopPropagation();${onclick}" class="upload-btn" style="${primary ? 'background:rgba(166,230,53,0.1);border:1px solid rgba(166,230,53,0.3);color:#A6E635' : 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)'}">${label}</button>`;
 
   return `
     <div style="background:#161618;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px;margin-bottom:16px">
-      <div onclick="toggleOptPanel()" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;user-select:none;${abierto ? 'margin-bottom:14px' : ''}">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#9A9AA0" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="transition:transform 0.15s;transform:rotate(${abierto ? 90 : 0}deg)"><polyline points="9 6 15 12 9 18"/></svg>
           <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px">Opciones · Puts y Covered Calls <span style="text-transform:none;letter-spacing:0;font-weight:600;color:#5A5A60">· precios USD cable, sin ajuste a MEP</span></div>
           ${!abierto && abiertas.length ? `<span style="font-size:12px;color:#9A9AA0">${abiertas.length} abiertas · resultado <strong style="font-family:'JetBrains Mono',monospace;color:${colorN(resultado)}">${usd(resultado)}</strong>${nEjercibles ? ' · ' + chip(nEjercibles + ' ejercible' + (nEjercibles > 1 ? 's' : ''), '#F59E0B') : ''}${nVencidas ? ' ' + chip(nVencidas + ' vencida' + (nVencidas > 1 ? 's' : ''), '#D33A3F') : ''}</span>` : ''}
         </div>
@@ -2009,6 +2008,7 @@ async function eliminarOpcion(fundId, id) {
 // ═══════════════════════════════════════════════════════════════════
 const TOOL_TABS = [
   ['fund',  'Cartera'],
+  ['opc',   'Opciones'],
   ['atrib', 'Atribución'],
   ['venc',  'Vencimientos'],
   ['costo', 'Resultado vs costo'],
@@ -2028,9 +2028,11 @@ function renderTabs(fundId, activa) {
   const nAlertas = typeof alertasConcentracion === 'function' ? alertasConcentracion(fundId).filter(a => a.estado === 'excedido').length : 0;
   return `
     <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px;border-bottom:1px solid rgba(255,255,255,0.08)">
-      ${TOOL_TABS.map(([k, label]) => {
+      ${TOOL_TABS.filter(([k]) => k !== 'opc' || fundId === 'CICLO_NOVA' || (state.opciones[fundId] || []).length).map(([k, label]) => {
         const on = k === activa;
-        const badge = k === 'conc' && nAlertas ? ` <span style="display:inline-block;min-width:16px;padding:0 5px;border-radius:8px;background:#D33A3F;color:#fff;font-size:10px;line-height:16px;text-align:center">${nAlertas}</span>` : '';
+        const nOpc = k === 'opc' ? (state.opciones[fundId] || []).filter(o => o.estado !== 'CERRADA').map(calcOpcion).filter(c => c.itm || (c.dias != null && c.dias < 0)).length : 0;
+        const badge = nOpc ? ` <span title="Opciones ejercibles o vencidas sin cerrar" style="display:inline-block;min-width:16px;padding:0 5px;border-radius:8px;background:#F59E0B;color:#0A0A0B;font-size:10px;line-height:16px;text-align:center;font-weight:800">${nOpc}</span>`
+                    : k === 'conc' && nAlertas ? ` <span style="display:inline-block;min-width:16px;padding:0 5px;border-radius:8px;background:#D33A3F;color:#fff;font-size:10px;line-height:16px;text-align:center">${nAlertas}</span>` : '';
         return `<button onclick="irA('${k}')"
           style="padding:9px 14px;font-size:13px;font-weight:${on ? 800 : 600};font-family:inherit;cursor:pointer;background:none;border:none;
                  border-bottom:2px solid ${on ? '#A6E635' : 'transparent'};margin-bottom:-1px;color:${on ? '#E5E5E7' : '#9A9AA0'}">${label}${badge}</button>`;
@@ -2329,7 +2331,7 @@ function renderRentaFija(fundId) {
           <th class="num">Precio</th><th class="num">TIR</th><th class="num">Duration mod.</th><th>Método</th><th></th></tr></thead>
         <tbody>${det || '<tr><td colspan="10" style="color:#5A5A60">No hay instrumentos de renta fija.</td></tr>'}</tbody>
       </table></div>`)}`;
-  return renderToolPage(fundId, 'rf', '', cuerpo);
+  return renderToolPage(fundId, 'rf', `<button onclick="abrirImportarFlujos('${fundId}')" class="upload-btn" style="background:rgba(166,230,53,0.1);border:1px solid rgba(166,230,53,0.3);color:#A6E635">⬆ Importar flujos</button>`, cuerpo);
 }
 
 function abrirRfParams(fundId, ticker) {
@@ -2505,7 +2507,7 @@ function renderVencimientos(fundId) {
       ${statTile('Cobros en el horizonte', fMon(fundId, sumRf(lista)), lista.filter(e => e.clase === 'rf').length + ' eventos')}
       ${V.opciones ? statTile('Opciones que vencen', String(optEnRango.length), putsItm < 0 ? fMon(fundId, putsItm) + ' en puts ejercibles' : 'ningún put ejercible', putsItm < 0 ? '#F59E0B' : null) : ''}
     </div>
-    ${sinFlujos ? `<div style="font-size:12px;color:#5A5A60;margin-top:12px">${sinFlujos} instrumento${sinFlujos > 1 ? 's' : ''} de renta fija sin flujos configurados: figuran solo al vencimiento y por su valor actual (marcados “estimado”). Configuralos en la pestaña Renta fija para ver cupones y amortizaciones.</div>` : ''}`;
+    ${sinFlujos ? `<div style="font-size:12px;color:#5A5A60;margin-top:12px">${sinFlujos} instrumento${sinFlujos > 1 ? 's' : ''} de renta fija sin flujos configurados: figuran solo al vencimiento y por su valor actual (marcados “estimado”). Configuralos en la pestaña Renta fija o con <a href="#" onclick="abrirImportarFlujos('${fundId}');return false" style="color:#A6E635">Importar flujos</a> para ver cupones y amortizaciones.</div>` : ''}`;
 
   // Barras por mes (solo renta fija)
   const porMes = {};
@@ -2557,7 +2559,7 @@ function renderVencimientos(fundId) {
       <div style="display:flex;gap:6px;flex-wrap:wrap">${VENC_HORIZONTES.map(([k, l]) => pillBtn(V.horizonte === k, l, `state.vencVista.horizonte='${k}';render()`)).join('')}</div>
       ${pillBtn(V.opciones, (V.opciones ? '✓ ' : '') + 'Incluir opciones', 'state.vencVista.opciones=!state.vencVista.opciones;render()')}
     </div>`;
-  return renderToolPage(fundId, 'venc', '', controles + panel('Resumen', tiles) + panel('Cobros por mes · renta fija', barras) + tablaVencidas + tabla);
+  return renderToolPage(fundId, 'venc', `<button onclick="abrirImportarFlujos('${fundId}')" class="upload-btn" style="background:rgba(166,230,53,0.1);border:1px solid rgba(166,230,53,0.3);color:#A6E635">⬆ Importar flujos</button>`, controles + panel('Resumen', tiles) + panel('Cobros por mes · renta fija', barras) + tablaVencidas + tabla);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -3052,7 +3054,265 @@ function simAgregar(fundId) {
 }
 function simQuitar(fundId, i) { simOps(fundId).splice(i, 1); render(); }
 
+// ═══════════════════════════════════════════════════════════════════
+// IMPORTAR FLUJOS DE RENTA FIJA (pegar desde Excel o subir .xlsx/.csv)
+// ═══════════════════════════════════════════════════════════════════
+// Cada fila se detecta sola:
+//   Flujos  → ticker | fecha | monto por 1 de nominal [| moneda]
+//             (varias filas por ticker = cronograma; una sola fila = cero cupón / LECAP)
+//   Bullet  → ticker | cupón % anual | pagos por año [| vencimiento] [| moneda]
+// Moneda opcional: USD, USD cable (o "cable"), ARS (o "pesos"). Sin moneda se mantiene la
+// configurada, o se deduce del activo. Filas de encabezado o vacías se ignoran.
+let _impPend = null;
+
+function impNum(x) {
+  if (typeof x === 'number') return x;
+  let s = String(x ?? '').trim().replace(/\s|%/g, '');
+  if (!s) return null;
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(s);
+  return isFinite(n) ? n : null;
+}
+function impFecha(x) {
+  if (x instanceof Date && !isNaN(x)) return isoLocal(x);
+  if (typeof x === 'number' && x > 20000 && x < 80000) {          // serial de Excel
+    return isoLocal(new Date(Math.round((x - 25569) * 86400000) + 12 * 3600000));
+  }
+  const s = String(x ?? '').trim();
+  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  if (m) {
+    const y = m[3].length === 2 ? '20' + m[3] : m[3];
+    const d = +m[1], mo = +m[2];
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+function impMoneda(x) {
+  const s = String(x ?? '').trim().toLowerCase();
+  if (/cable|ccl/.test(s)) return 'USD cable';
+  if (/^(usd|u\$s|us\$|dolar|dólar|mep)/.test(s)) return 'USD';
+  if (/^(ars|\$|pesos?)$/.test(s)) return 'ARS';
+  return null;
+}
+
+// Busca el ticker en la cartera: exacto, o con/sin la "D" final (AL30 ↔ AL30D)
+function impTicker(fundId, raw) {
+  const t = String(raw ?? '').trim().toUpperCase().replace(/^#/, '').split(/\s+/)[0];
+  if (!t) return null;
+  const tk = new Set((state.holdings[fundId] || []).map(h => h.ticker));
+  if (tk.has(t)) return { ticker: t, enCartera: true };
+  for (const c of [t + 'D', t.replace(/D$/, ''), t + 'C']) if (tk.has(c)) return { ticker: c, enCartera: true, desde: t };
+  return { ticker: t, enCartera: false };
+}
+
+function impParsear(fundId, filas) {
+  const flujos = {}, bullets = {}, monedas = {}, ignoradas = [];
+  filas.forEach((cells, i) => {
+    const c = (cells || []).map(x => (typeof x === 'string' ? x.trim() : x)).filter(x => x !== '' && x != null);
+    if (c.length < 2) return;
+    const tk = impTicker(fundId, c[0]);
+    if (!tk || /^(ticker|especie|activo|bono|papel)$/i.test(String(c[0]).trim())) return;   // encabezado
+    const mon = c.slice(1).map(impMoneda).find(Boolean) || null;
+    const resto = c.slice(1).filter(x => !impMoneda(x));
+    const f1 = impFecha(resto[0]);
+    if (f1) {                                                     // ticker | fecha | monto
+      const monto = impNum(resto[1]);
+      if (monto == null || monto < 0) { ignoradas.push({ fila: i + 1, txt: c.join(' | '), motivo: 'falta el monto' }); return; }
+      (flujos[tk.ticker] = flujos[tk.ticker] || { tk, l: [] }).l.push({ fecha: f1, monto });
+    } else {                                                      // ticker | cupón | frecuencia [| vto]
+      let cupon = impNum(resto[0]); const freq = impNum(resto[1]);
+      if (cupon == null || freq == null) { ignoradas.push({ fila: i + 1, txt: c.join(' | '), motivo: 'formato no reconocido' }); return; }
+      if (cupon > 0 && cupon < 0.5 && !String(resto[0]).includes('%')) cupon *= 100;          // 0,075 → 7,5%
+      if (![1, 2, 4, 12].includes(Math.round(freq))) { ignoradas.push({ fila: i + 1, txt: c.join(' | '), motivo: 'pagos por año debe ser 1, 2, 4 o 12' }); return; }
+      bullets[tk.ticker] = { tk, cupon, frecuencia: Math.round(freq), vencimiento: impFecha(resto[2]) };
+    }
+    if (mon) monedas[tk.ticker] = mon;
+  });
+
+  const meta = state.meta[fundId] || {};
+  const actual = state.rfParams[fundId] || {};
+  const monedaDe = t => monedas[t] || actual[t]?.moneda_flujos || rfAuto(t, meta[t])?.moneda_flujos || (meta[t]?.moneda === 'ARS' ? 'ARS' : 'USD');
+  const vtoPDF = t => (state.holdings[fundId] || []).find(h => h.ticker === t)?.vencimiento || null;
+  const rows = [];
+  for (const [t, { tk, l }] of Object.entries(flujos)) {
+    const fl = l.sort((a, b) => a.fecha.localeCompare(b.fecha));
+    const dedup = fl.filter((x, i) => i === 0 || x.fecha !== fl[i - 1].fecha);
+    const row = { fund_id: fundId, ticker: t, metodo: dedup.length === 1 ? 'cero' : 'flujos', moneda_flujos: monedaDe(t),
+      vencimiento: null, cupon: null, frecuencia: null, valor_final: null, flujos: null, tir_manual: null, md_manual: null };
+    if (row.metodo === 'cero') { row.vencimiento = dedup[0].fecha; row.valor_final = dedup[0].monto; }
+    else row.flujos = dedup;
+    rows.push({ row, tk, n: dedup.length, dup: fl.length - dedup.length });
+  }
+  for (const [t, b] of Object.entries(bullets)) {
+    if (flujos[t]) continue;   // si vino con flujos, mandan los flujos
+    rows.push({ tk: b.tk, n: null, row: { fund_id: fundId, ticker: t, metodo: 'bullet', moneda_flujos: monedaDe(t),
+      vencimiento: b.vencimiento, cupon: b.cupon, frecuencia: b.frecuencia, valor_final: 1, flujos: null, tir_manual: null, md_manual: null } });
+  }
+  const hoy = fechaArgISO();
+  for (const r of rows) {
+    r.reemplaza = !!actual[r.row.ticker];
+    const fl = rfFlujos(r.row, vtoPDF(r.row.ticker), hoy);
+    r.prox = fl[0] || null;
+    r.nFut = fl.length;
+    r.sinVto = r.row.metodo === 'bullet' && !r.row.vencimiento && !vtoPDF(r.row.ticker);
+  }
+  return { rows: rows.sort((a, b) => a.row.ticker.localeCompare(b.row.ticker)), ignoradas };
+}
+
+function abrirImportarFlujos(fundId) {
+  showModal(`
+    <div class="modal-box" style="max-width:720px">
+      <div class="modal-header">
+        <div><div style="font-size:11px;color:#5A5A60;font-weight:700;text-transform:uppercase">Renta fija</div>
+          <div style="font-size:16px;font-weight:800">Importar flujos</div></div>
+        <button onclick="closeModal()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:18px">✕</button>
+      </div>
+      <div class="modal-body" style="display:grid;gap:12px">
+        <div style="font-size:12px;color:#9A9AA0;line-height:1.55">
+          Pegá desde Excel o subí un archivo. Cada fila puede ser:<br>
+          <strong style="color:#E5E5E7">Flujos</strong> · <span style="font-family:'JetBrains Mono',monospace">ticker | fecha | monto por 1 de nominal</span>
+            <span style="color:#5A5A60">— varias filas por bono = cronograma (cupón + amortización de cada fecha); una sola fila = paga todo al vencimiento (LECAP, BONCAP)</span><br>
+          <strong style="color:#E5E5E7">Cupón fijo</strong> · <span style="font-family:'JetBrains Mono',monospace">ticker | cupón % | pagos por año [| vencimiento]</span>
+            <span style="color:#5A5A60">— sin vencimiento usa el del PDF</span><br>
+          <span style="color:#5A5A60">Opcional en cualquier fila: una columna de moneda (USD, USD cable o ARS). AL30 y AL30D se reconocen igual.</span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn-secondary" style="padding:6px 12px;font-size:12px" onclick="descargarPlantillaFlujos('${fundId}')">⬇ Descargar plantilla con los bonos de la cartera</button>
+          <label class="btn-secondary" style="padding:6px 12px;font-size:12px;cursor:pointer">⬆ Subir Excel / CSV
+            <input type="file" accept=".xlsx,.xls,.csv,.txt" style="display:none" onchange="impLeerArchivo('${fundId}', this.files[0])"></label>
+        </div>
+        <textarea id="imp-txt" class="cms-input" style="width:100%;box-sizing:border-box;height:200px;font-family:'JetBrains Mono',monospace;font-size:12px"
+          placeholder="AL30D&#9;09/01/2027&#9;0,0875&#10;AL30D&#9;09/07/2027&#9;0,0866&#10;HVS1D&#9;7,5&#9;2&#10;S13N6D&#9;13/11/2026&#9;1,0981&#9;ARS"></textarea>
+        <div id="imp-err" style="color:#D33A3F;font-size:12px;font-weight:600"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="closeModal()">Cancelar</button>
+        <button class="btn-primary" onclick="impPrevisualizar('${fundId}')">Ver vista previa →</button>
+      </div>
+    </div>`);
+}
+
+function impTextoAFilas(txt) {
+  return txt.split(/\r?\n/).map(l => l.includes('\t') ? l.split('\t') : l.includes(';') ? l.split(';') : l.split(/\s*,\s*(?=\S)|\s{2,}/));
+}
+
+async function impLeerArchivo(fundId, file) {
+  if (!file) return;
+  const err = document.getElementById('imp-err');
+  try {
+    let filas = [];
+    if (/\.(csv|txt)$/i.test(file.name)) filas = impTextoAFilas(await file.text());
+    else {
+      await cargarXLSX();
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+      for (const n of wb.SheetNames) filas.push(...XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: '' }));
+    }
+    impMostrarPreview(fundId, filas);
+  } catch (e) { if (err) err.textContent = 'No se pudo leer el archivo: ' + e.message; }
+}
+
+function impPrevisualizar(fundId) {
+  const txt = document.getElementById('imp-txt')?.value || '';
+  if (!txt.trim()) { document.getElementById('imp-err').textContent = 'Pegá los datos o subí un archivo.'; return; }
+  impMostrarPreview(fundId, impTextoAFilas(txt));
+}
+
+function impMostrarPreview(fundId, filas) {
+  const { rows, ignoradas } = impParsear(fundId, filas);
+  if (!rows.length) {
+    const err = document.getElementById('imp-err');
+    if (err) err.textContent = 'No se reconoció ningún bono. ' + (ignoradas[0] ? `Ej. fila ${ignoradas[0].fila}: ${ignoradas[0].motivo}.` : '');
+    return;
+  }
+  _impPend = { fundId, rows };
+  const det = r => r.row.metodo === 'bullet'
+    ? `${f2(r.row.cupon)}% · ${{ 1: 'anual', 2: 'semestral', 4: 'trimestral', 12: 'mensual' }[r.row.frecuencia]}`
+    : r.row.metodo === 'cero' ? `pago final ${f4(r.row.valor_final)}` : `${r.n} pagos`;
+  const tabla = rows.map(r => `
+    <tr>
+      <td style="padding:6px 10px"><span class="ticker-chip">${r.row.ticker}</span>${r.tk.desde ? `<span style="font-size:10px;color:#5A5A60;display:block">pegado como ${r.tk.desde}</span>` : ''}</td>
+      <td style="padding:6px 10px;font-size:12px;color:#C0C0C8">${RF_METODOS[r.row.metodo]}</td>
+      <td style="padding:6px 10px;font-size:12px;font-family:'JetBrains Mono',monospace">${det(r)}</td>
+      <td style="padding:6px 10px;font-size:12px">${r.row.moneda_flujos}</td>
+      <td style="padding:6px 10px;font-size:12px;font-family:'JetBrains Mono',monospace">${r.prox ? fDiaHist(r.prox.fecha, true) + ' · ' + f4(r.prox.monto) : '—'}</td>
+      <td style="padding:6px 10px;font-size:11px;color:${!r.tk.enCartera || r.sinVto || !r.nFut ? '#F59E0B' : '#9A9AA0'}">
+        ${[!r.tk.enCartera ? 'no está en cartera' : '', r.sinVto ? 'falta vencimiento' : '', r.tk.enCartera && !r.sinVto && !r.nFut ? 'sin pagos futuros' : '',
+           r.reemplaza ? 'reemplaza la configuración actual' : '', r.dup ? r.dup + ' fechas repetidas (quedó la primera)' : ''].filter(Boolean).join(' · ') || 'OK'}</td>
+    </tr>`).join('');
+  showModal(`
+    <div class="modal-box" style="max-width:820px">
+      <div class="modal-header">
+        <div><div style="font-size:11px;color:#5A5A60;font-weight:700;text-transform:uppercase">Importar flujos · vista previa</div>
+          <div style="font-size:16px;font-weight:800">${rows.length} bono${rows.length > 1 ? 's' : ''} reconocido${rows.length > 1 ? 's' : ''}</div></div>
+        <button onclick="closeModal()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:18px">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="max-height:380px;overflow-y:auto;border:1px solid rgba(255,255,255,0.08);border-radius:8px">
+          <table style="width:100%;border-collapse:collapse"><thead><tr>
+            ${['Bono', 'Método', 'Detalle', 'Moneda', 'Próximo pago', 'Estado'].map(h => `<th style="padding:8px 10px;text-align:left;font-size:10px;color:#5A5A60;text-transform:uppercase">${h}</th>`).join('')}
+          </tr></thead><tbody>${tabla}</tbody></table>
+        </div>
+        ${ignoradas.length ? `<div style="font-size:12px;color:#F59E0B;margin-top:10px">${ignoradas.length} fila${ignoradas.length > 1 ? 's' : ''} ignorada${ignoradas.length > 1 ? 's' : ''}:
+          ${ignoradas.slice(0, 5).map(x => `<br>· fila ${x.fila} (${x.motivo}): <span style="font-family:'JetBrains Mono',monospace;color:#9A9AA0">${x.txt.slice(0, 70)}</span>`).join('')}${ignoradas.length > 5 ? '<br>…' : ''}</div>` : ''}
+        <div style="font-size:11px;color:#5A5A60;margin-top:10px">Los montos son por 1 de nominal y en la moneda indicada. Después podés revisar o corregir cada bono con ✎ en Renta fija.</div>
+        <div id="imp-err2" style="color:#D33A3F;font-size:12px;font-weight:600;margin-top:6px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="abrirImportarFlujos('${fundId}')">← Volver</button>
+        <button class="btn-primary" onclick="impConfirmar()">✓ Importar ${rows.length}</button>
+      </div>
+    </div>`);
+}
+
+async function impConfirmar() {
+  if (!_impPend) return;
+  const { fundId, rows } = _impPend;
+  const err = document.getElementById('imp-err2');
+  const body = rows.map(r => ({ ...r.row, updated_at: new Date().toISOString() }));
+  try {
+    const r = await fetch(`${SB_URL}/renta_fija_params?on_conflict=fund_id,ticker`, {
+      method: 'POST',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('Supabase ' + r.status + (r.status === 404 ? ' (¿corriste herramientas.sql?)' : ''));
+    const dest = (state.rfParams[fundId] = state.rfParams[fundId] || {});
+    for (const b of body) dest[b.ticker] = b;
+    _impPend = null;
+    closeModal(); render();
+  } catch (e) { if (err) err.textContent = 'No se pudo importar: ' + e.message; }
+}
+
+// Plantilla .xlsx: hoja "Flujos" y hoja "Cupón fijo" con los bonos de la cartera ya listados
+async function descargarPlantillaFlujos(fundId) {
+  try {
+    await cargarXLSX();
+    const rf = calcRentaFija(fundId).filter(f => !f.p?._auto).sort((a, b) => a.ticker.localeCompare(b.ticker));
+    const hFl = [['Ticker', 'Fecha (dd/mm/aaaa)', 'Monto por 1 de nominal', 'Moneda (USD / USD cable / ARS)']];
+    const hBu = [['Ticker', 'Cupón % anual', 'Pagos por año (1/2/4/12)', 'Vencimiento (vacío = el del PDF)', 'Moneda (USD / USD cable / ARS)']];
+    for (const f of rf) {
+      if (f.p?.metodo === 'flujos') for (const x of f.flujos) hFl.push([f.ticker, fDiaHist(x.fecha, true), x.monto, f.monFl]);
+      else if (f.p?.metodo === 'cero') hFl.push([f.ticker, f.vto ? fDiaHist(f.vto, true) : '', f.p.valor_final ?? 1, f.monFl]);
+      else if (f.p?.metodo === 'bullet') hBu.push([f.ticker, f.p.cupon, f.p.frecuencia, f.p.vencimiento ? fDiaHist(f.p.vencimiento, true) : '', f.monFl]);
+      else {
+        hFl.push([f.ticker, f.vto ? fDiaHist(f.vto, true) : '', '', f.monFl]);
+        hBu.push([f.ticker, '', '', '', f.monFl]);
+      }
+    }
+    const wb = XLSX.utils.book_new();
+    const s1 = XLSX.utils.aoa_to_sheet(hFl), s2 = XLSX.utils.aoa_to_sheet(hBu);
+    s1['!cols'] = [{ wch: 16 }, { wch: 20 }, { wch: 24 }, { wch: 30 }];
+    s2['!cols'] = [{ wch: 16 }, { wch: 14 }, { wch: 22 }, { wch: 30 }, { wch: 30 }];
+    XLSX.utils.book_append_sheet(wb, s1, 'Flujos');
+    XLSX.utils.book_append_sheet(wb, s2, 'Cupón fijo');
+    XLSX.writeFile(wb, `flujos_${fundId}_${fechaArgISO()}.xlsx`);
+  } catch (e) { alert('No se pudo generar la plantilla: ' + e.message); }
+}
+
 const TOOL_RENDER = {
+  opc:   fundId => renderToolPage(fundId, 'opc', '', renderOpciones(fundId)),
   venc:  renderVencimientos,
   costo: renderResultadoCosto,
   rf:    renderRentaFija,
@@ -3676,7 +3936,6 @@ function renderFondo(fundId) {
 
       ${renderTabs(fundId, 'fund')}
       ${renderHistorial(fundId)}
-      ${fundId === 'CICLO_NOVA' || (state.opciones[fundId] || []).length ? renderOpciones(fundId) : ''}
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
         <!-- Breakdown buttons -->
         <div style="display:flex;gap:6px">
