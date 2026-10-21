@@ -664,7 +664,7 @@ function calcNAV(fundId) {
     const { price } = calcPrecio(h, m, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
     const lamina = m?.lamina || 1;
     const montoH = h.cantidad * (price / lamina);
-    const isShortCallH = ['Covered Call', 'Venta Call'].includes(m?.tipo);
+    const isShortCallH = SHORT_OPT_TIPOS.includes(m?.tipo);
     totalInv += isShortCallH ? -Math.abs(montoH) : montoH;
   }
 
@@ -1053,12 +1053,21 @@ function renderLanding() {
     <div class="fund-cards">${cards}</div>`;
 }
 
-// ── MONTOS AJUSTADOS POR NOCIONAL DE OPCIONES (solo CICLO_NOVA) ──────
-// Para Venta/Covered Call: montoDisplay = monto + cantidad × base
-// El exceso nocional se descuenta en partes iguales de los MM USD.
-// Compra Call NO lleva ajuste: se valúa por la prima (cantidad × precio),
-// porque el comprador no tiene exposición nocional que respaldar.
-const OPTION_TIPOS = ['Venta Call', 'Covered Call'];
+// ── MONTOS AJUSTADOS POR NOCIONAL DE OPCIONES VENDIDAS (solo CICLO_NOVA) ──
+// Opción vendida (Venta Call, Covered Call, Venta Put):
+//   montoTabla   = −|prima|              → lo que vale la posición (resta en el PN)
+//   montoDisplay = −|prima| + nocional   → exposición (nocional = cantidad × BASE)
+// El nocional total se RESERVA de la liquidez (MM y cauciones USD/ARS, o
+// cualquier activo con categoría "Liquidez"), en proporción a su monto, para
+// que esa caja no se use para nuevas compras. Si el nocional supera la
+// liquidez, la liquidez queda negativa (alerta visible en rojo).
+// En un Covered Call armado (acción + call) el nocional de la call también se
+// reserva y se suma a la exposición de la fila combinada.
+// Compras de opciones (Compra Call / Compra Put) NO llevan ajuste: se valúan
+// por la prima, porque el comprador no tiene exposición nocional que respaldar.
+const SHORT_OPT_TIPOS = ['Venta Call', 'Covered Call', 'Venta Put'];
+const LIQUIDEZ_TIPOS  = ['Money Market USD', 'Money Market ARS', 'Caución USD', 'Caución ARS'];
+const esLiquidez = meta => LIQUIDEZ_TIPOS.includes(meta?.tipo) || meta?.categoria === 'Liquidez';
 
 function calcMontosCartera(fundId) {
   const cfg       = FUNDS_CONFIG[fundId];
@@ -1073,8 +1082,8 @@ function calcMontosCartera(fundId) {
     const lamina  = meta?.lamina || 1;
     const monto   = h.cantidad * (price / lamina);
     const tipo    = meta?.tipo || 'Otros';
-    const isOpt   = applyAdj && OPTION_TIPOS.includes(tipo);
-    let notional  = isOpt ? h.cantidad * (meta?.base || 0) : 0;
+    const isOpt   = applyAdj && SHORT_OPT_TIPOS.includes(tipo);
+    let notional  = isOpt ? Math.abs(h.cantidad) * (meta?.base || 0) : 0;
     // El nocional (cantidad × BASE) está en la moneda del instrumento.
     // Convertir a la moneda del fondo vía MEP si difieren (ej: call en ARS, fondo USD).
     if (notional !== 0) {
@@ -1100,10 +1109,11 @@ function calcMontosCartera(fundId) {
         const cc       = _ccByStock.get(item.ticker);
         const callItem = resultItems.find(i => i.ticker === cc.ticker_call);
         if (callItem) {
-          const netMonto = item.monto - Math.abs(callItem.monto);
+          const netMonto  = item.monto - Math.abs(callItem.monto);
+          const ccNotional = callItem.notional || 0;
           merged.push({ ...item, tipo: 'Covered Call', monto: netMonto,
-            montoDisplay: netMonto, montoTabla: netMonto,
-            _isCoveredCall: true, _cc: cc });
+            montoDisplay: netMonto + ccNotional, montoTabla: netMonto,
+            notional: ccNotional, _isCoveredCall: true, _cc: cc });
           continue;
         }
       }
@@ -1114,25 +1124,29 @@ function calcMontosCartera(fundId) {
 
   if (!applyAdj) return mergeCoveredCalls(items.map(i => ({ ...i, montoDisplay: i.monto, montoTabla: i.monto })));
 
+  // Reserva del nocional: proporcional entre los activos de liquidez
   const totalNotional = items.reduce((s, i) => s + i.notional, 0);
-  // Distribuir nocional proporcionalmente entre MM USD y Caución USD
-  const LIQUIDEZ_USD = ['Money Market USD', 'Caución USD'];
-  const liqItems     = items.filter(i => LIQUIDEZ_USD.includes(i.tipo));
-  const totalLiqUsd  = liqItems.reduce((s, i) => s + i.monto, 0);
+  const totalLiq      = items.filter(i => esLiquidez(i.meta)).reduce((s, i) => s + i.monto, 0);
 
   const base = items.map(i => {
-    const isShortCall = ['Covered Call', 'Venta Call'].includes(i.tipo);
-    let montoDisplay = i.monto;
+    const isShort    = SHORT_OPT_TIPOS.includes(i.tipo);
+    const montoTabla = isShort ? -Math.abs(i.monto) : i.monto;
+    let montoDisplay = montoTabla;
+    let reservado    = 0;
     if (i.isOpt) {
-      montoDisplay = i.monto + i.notional;
-    } else if (LIQUIDEZ_USD.includes(i.tipo)) {
-      const share = totalLiqUsd > 0 ? i.monto / totalLiqUsd : 0;
-      montoDisplay = Math.max(0, i.monto - totalNotional * share);
+      montoDisplay = montoTabla + i.notional;
+    } else if (esLiquidez(i.meta) && totalLiq > 0) {
+      reservado    = totalNotional * (i.monto / totalLiq);
+      montoDisplay = i.monto - reservado;   // sin piso: negativo = nocional > liquidez
     }
-    const montoTabla = isShortCall ? -Math.abs(i.monto) : i.monto;
-    return { ...i, montoDisplay, montoTabla };
+    return { ...i, montoDisplay, montoTabla, reservado };
   });
-  return mergeCoveredCalls(base);
+  const out = mergeCoveredCalls(base);
+  // Si no hay activos de liquidez en cartera, el nocional se descuenta de la
+  // liquidez de los ajustes (disponibilidades) en el panel de composición.
+  out.notionalSinReserva = totalLiq > 0 ? 0 : totalNotional;
+  out.totalNotional      = totalNotional;
+  return out;
 }
 
 // ── BREAKDOWN ────────────────────────────────────────────────────────
@@ -1180,7 +1194,7 @@ function renderBreakdownPanel(fundId) {
   // Liquidez = base - subtotal cartera (ajustes + honorarios netos).
   // En modo "activos financieros" excluye los bienes de cambio → liquidez financiera real.
   // En modo "subtotal cartera" da 0 → el panel muestra solo las tenencias.
-  const liquidez     = basePN - totalInv;
+  const liquidez     = basePN - totalInv - (rawItems.notionalSinReserva || 0);
   const fondoMoneda  = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
 
   const groups = {};
@@ -1286,6 +1300,9 @@ function renderFondo(fundId) {
   const montosAjust  = calcMontosCartera(fundId); // mapa ticker → montoDisplay
   const montosMap      = Object.fromEntries(montosAjust.map(i => [i.ticker, i.montoDisplay]));
   const montosTablaMap = Object.fromEntries(montosAjust.map(i => [i.ticker, i.montoTabla]));
+  const reservaMap     = Object.fromEntries(montosAjust.map(i => [i.ticker, i.reservado || 0]));
+  const ccNotionalMap  = Object.fromEntries(montosAjust.filter(i => i._isCoveredCall).map(i => [i.ticker, i.notional || 0]));
+  const subNota = txt => `<span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">${txt}</span>`;
 
   // Covered Call lookups
   const ccList    = state.coveredCalls[fundId] || [];
@@ -1303,7 +1320,7 @@ function renderFondo(fundId) {
     const cierre  = h.cierre * lamina;
     const monto   = h.cantidad * (price / lamina);
     const tipo    = meta?.tipo   || 'Otros';
-    const isShortCall = ['Covered Call', 'Venta Call'].includes(tipo);
+    const isShortCall = SHORT_OPT_TIPOS.includes(tipo);
     const priceDisplay = live ? price : cierre;
     const varPct  = live && cierre > 0
       ? (isShortCall ? cierre / price - 1 : price / cierre - 1)
@@ -1349,7 +1366,8 @@ function renderFondo(fundId) {
       }
       const ccStockMonto = pairedQty * priceUnit;
       const netMonto     = ccStockMonto - Math.abs(callMonto);
-      const netPct       = pn > 0 ? (netMonto / pn * 100).toFixed(2) + '%' : '—';
+      const ccNotional   = ccNotionalMap[h.ticker] || 0;
+      const netPct       = pn > 0 ? ((netMonto + ccNotional) / pn * 100).toFixed(2) + '%' : '—';
 
       const dissolveBtn = `<button onclick="eliminarCoveredCall(${cc.id})"
         title="Disolver Covered Call"
@@ -1367,7 +1385,7 @@ function renderFondo(fundId) {
         <td class="num">${f2(priceDisplay)} ${badge}</td>
         <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
         <td class="num" style="color:${varHistColor}">${varHist !== null ? fPct(varHist) : '—'}</td>
-        <td class="num">${fARS(netMonto)}</td>
+        <td class="num">${fARS(netMonto)}${ccNotional > 0 ? subNota('exposición ' + fARS(netMonto + ccNotional)) : ''}</td>
         <td class="num" style="color:#9A9AA0">${netPct}</td>
         <td>${dissolveBtn}</td>
       </tr>`;
@@ -1402,7 +1420,13 @@ function renderFondo(fundId) {
         <td class="num">${f2(priceDisplay)} ${badge}</td>
         <td class="num" style="color:${varColor}">${fPct(varPct)}</td>
         <td class="num" style="color:${varHistColor}">${varHist !== null ? fPct(varHist) : '—'}</td>
-        <td class="num">${fARS(montoTabla)}</td>
+        <td class="num">${fARS(montoTabla)}${
+          SHORT_OPT_TIPOS.includes(tipo) && Math.abs(montoDisplay - montoTabla) > 0.5
+            ? subNota('exposición ' + fARS(montoDisplay))
+            : (reservaMap[h.ticker] > 0.5
+                ? subNota('<span style="color:#D33A3F">reservado ' + fARS(-reservaMap[h.ticker]) + '</span> · libre ' + fARS(montoDisplay))
+                : '')
+        }</td>
         <td class="num" style="color:#9A9AA0">${pn > 0 ? (montoDisplay / pn * 100).toFixed(2) + '%' : '—'}</td>
         <td><span class="moneda-badge" style="background:${monedaBg};color:${monedaColor}">${instrMoneda}</span></td>
       </tr>`;
@@ -1678,7 +1702,7 @@ function generarOnePage(fundId) {
     const tipo      = meta?.tipo  || 'Otros';
     const cat       = meta?.categoria || 'Sin categoría';
     const instrMoneda = meta?.moneda || monedaFondo;
-    const isShort   = ['Covered Call','Venta Call'].includes(tipo);
+    const isShort   = SHORT_OPT_TIPOS.includes(tipo);
     const priceDisp = live ? price : cierre;
     const varPct    = live && cierre > 0 ? (isShort ? cierre/price - 1 : price/cierre - 1) : null;
     const pi        = meta?.precioInicial ?? null;
@@ -1713,6 +1737,7 @@ function generarOnePage(fundId) {
     'Pagaré':'Bonos','Pagaré USD':'Bonos','Pagaré ARS':'Bonos',
     'Equity USA':'Equity','Equity Argentina':'Equity','Cedear':'Equity',
     'Covered Call':'Covered Call','Venta Call':'Covered Call','Compra Call':'Covered Call',
+    'Venta Put':'Puts','Compra Put':'Puts','Liquidez':'Liquidez',
     'Money market USD':'Liquidez','Money market ARS':'Liquidez','Cash Cable':'Liquidez',
     'Commodities':'Commodities',
     'Short Equity':'Short Equity',
@@ -1720,7 +1745,7 @@ function generarOnePage(fundId) {
   };
   const GRUPO_COLORS = {
     'Bonos':'#86EFAC','Equity':'#A78BFA','Covered Call':'#F472B6',
-    'Liquidez':'#FCD34D','Commodities':'#2DD4BF',
+    'Liquidez':'#FCD34D','Commodities':'#2DD4BF','Puts':'#FB7185',
     'Short Equity':'#FB923C','Short Bonos':'#94A3B8','Otros':'#64748B',
   };
 
@@ -1988,7 +2013,7 @@ function calcFilasExport(fundId) {
     const lamina  = meta?.lamina || 1;
     const cierre  = h.cierre * lamina;
     const tipo    = meta?.tipo || 'Otros';
-    const isShortCall  = ['Covered Call', 'Venta Call'].includes(tipo);
+    const isShortCall  = SHORT_OPT_TIPOS.includes(tipo);
     const priceDisplay = live ? price : cierre;
     const varPct  = live && cierre > 0
       ? (isShortCall ? cierre / price - 1 : price / cierre - 1)
@@ -2018,12 +2043,13 @@ function calcFilasExport(fundId) {
         callMonto = h_call.cantidad * (cp / cl);
       }
       const netMonto = pairedQty * priceUnit - Math.abs(callMonto);
+      const ccNotional = montosAjust.find(i => i._isCoveredCall && i.ticker === h.ticker)?.notional || 0;
       filas.push({
         ticker: ccNombre,
         instrumento: (meta?.denom || h.ticker) + ' ✕ ' + cc.ticker_call,
         nominales: pairedQty, cierre: cierreUnit, actual: priceDisplay, live,
         varPct, varHist, monto: netMonto,
-        pctPN: pn > 0 ? netMonto / pn : null, moneda: instrMoneda,
+        pctPN: pn > 0 ? (netMonto + ccNotional) / pn : null, moneda: instrMoneda,
       });
       if (residualQty > 0) {
         filas.push({
@@ -2764,11 +2790,11 @@ function showActivosCMS(fundId, nuevos, denomMap) {
     'Futuro de Dólar',
     'Money Market ARS','Money Market USD','ON DL','ON HD',
     'Pagare ARS','Pagare USD','Short Equity','Short Renta Fija',
-    'Soberano DL','Soberano HD','Soberanos ARS','Venta Call',
+    'Soberano DL','Soberano HD','Soberanos ARS','Venta Call','Compra Put','Venta Put',
   ];
   const CATEGORIA_LISTA = [
     'Commodities','Compra Call','Covered Call','Equity','Futuro de Dólar','Liquidez',
-    'Renta Fija','Short Equity','Short Renta Fija','Venta Call',
+    'Renta Fija','Short Equity','Short Renta Fija','Venta Call','Compra Put','Venta Put',
   ];
   const isUsdFund = FUNDS_CONFIG[fundId]?.moneda === 'USD';
   const FUENTES_EXCLUIR_USD = ['calculo devengamiento', 'devengamiento ARS'];
@@ -3071,8 +3097,8 @@ async function cargarActivosTabla(fundId) {
 }
 
 async function abrirCrearActivo(fundId) {
-  const TIPO_LISTA_CR = ['Caución ARS', 'Caución USD', 'Commodities', 'Compra Call', 'Covered Call', 'Equity Argentina', 'Equity USA', 'Futuro de Dólar', 'Money Market ARS', 'Money Market USD', 'ON DL', 'ON HD', 'Pagare ARS', 'Pagare USD', 'Short Equity', 'Short Renta Fija', 'Soberano DL', 'Soberano HD', 'Soberanos ARS', 'Venta Call'];
-  const CAT_LISTA_CR  = ['Commodities', 'Compra Call', 'Covered Call', 'Equity', 'Futuro de Dólar', 'Liquidez', 'Renta Fija', 'Short Equity', 'Short Renta Fija', 'Venta Call'];
+  const TIPO_LISTA_CR = ['Caución ARS', 'Caución USD', 'Commodities', 'Compra Call', 'Covered Call', 'Equity Argentina', 'Equity USA', 'Futuro de Dólar', 'Money Market ARS', 'Money Market USD', 'ON DL', 'ON HD', 'Pagare ARS', 'Pagare USD', 'Short Equity', 'Short Renta Fija', 'Soberano DL', 'Soberano HD', 'Soberanos ARS', 'Venta Call', 'Compra Put', 'Venta Put'];
+  const CAT_LISTA_CR  = ['Commodities', 'Compra Call', 'Covered Call', 'Equity', 'Futuro de Dólar', 'Liquidez', 'Renta Fija', 'Short Equity', 'Short Renta Fija', 'Venta Call', 'Compra Put', 'Venta Put'];
   const isUsdFund = FUNDS_CONFIG[fundId]?.moneda === 'USD';
   const FUENTE_LISTA_CR = Object.keys(FUENTE_KIND)
     .filter(f => !isUsdFund || !['calculo devengamiento', 'devengamiento ARS'].includes(f));
@@ -3203,8 +3229,8 @@ async function abrirEditarActivo(fundId, ticker) {
     a = arr[0] || {};
   } catch(e) {}
 
-  const TIPO_LISTA_ED = ['Caución ARS', 'Caución USD', 'Commodities', 'Compra Call', 'Covered Call', 'Equity Argentina', 'Equity USA', 'Futuro de Dólar', 'Money Market ARS', 'Money Market USD', 'ON DL', 'ON HD', 'Pagare ARS', 'Pagare USD', 'Short Equity', 'Short Renta Fija', 'Soberano DL', 'Soberano HD', 'Soberanos ARS', 'Venta Call'];
-  const CAT_LISTA_ED  = ['Commodities', 'Compra Call', 'Covered Call', 'Equity', 'Futuro de Dólar', 'Liquidez', 'Renta Fija', 'Short Equity', 'Short Renta Fija', 'Venta Call'];
+  const TIPO_LISTA_ED = ['Caución ARS', 'Caución USD', 'Commodities', 'Compra Call', 'Covered Call', 'Equity Argentina', 'Equity USA', 'Futuro de Dólar', 'Money Market ARS', 'Money Market USD', 'ON DL', 'ON HD', 'Pagare ARS', 'Pagare USD', 'Short Equity', 'Short Renta Fija', 'Soberano DL', 'Soberano HD', 'Soberanos ARS', 'Venta Call', 'Compra Put', 'Venta Put'];
+  const CAT_LISTA_ED  = ['Commodities', 'Compra Call', 'Covered Call', 'Equity', 'Futuro de Dólar', 'Liquidez', 'Renta Fija', 'Short Equity', 'Short Renta Fija', 'Venta Call', 'Compra Put', 'Venta Put'];
   const isUsdFundED = FUNDS_CONFIG[fundId]?.moneda === 'USD';
   const FUENTE_LISTA_ED = Object.keys(FUENTE_KIND)
     .filter(f => !isUsdFundED || !['calculo devengamiento', 'devengamiento ARS'].includes(f));
