@@ -782,6 +782,68 @@ async function cargarHoldings() {
   }
 }
 
+// Historial de VCP (Clase A) — se alimenta con cada PDF que se carga
+async function cargarHistorial() {
+  try {
+    const out = {};
+    const PAGE = 1000;
+    for (let offset = 0; ; offset += PAGE) {
+      const rows = await sbGet(`/vcp_historial?select=fund_id,fecha,vcp,pn&clase=eq.A&order=fund_id.asc,fecha.asc&limit=${PAGE}&offset=${offset}`);
+      for (const r of rows) {
+        (out[r.fund_id] = out[r.fund_id] || []).push({
+          fecha: r.fecha, vcp: parseFloat(r.vcp), pn: r.pn != null ? parseFloat(r.pn) : null,
+        });
+      }
+      if (rows.length < PAGE) break;
+    }
+    return out;
+  } catch (e) {
+    console.warn('[iEB] cargarHistorial error (¿existe la tabla vcp_historial?):', e.message);
+    return {};
+  }
+}
+
+// '20/10/2026' → '2026-10-20'
+function fechaPDFaISO(f) {
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec((f || '').trim());
+  return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : null;
+}
+
+// Arma el punto de historial a partir de un PDF ya parseado.
+// El VCP del PDF puede venir en otra escala (ej. por 1.000 cuotapartes):
+// se normaliza contra el último valor guardado para que la serie sea continua.
+function prepararVcpHistorial(fundId, data) {
+  const fecha = fechaPDFaISO(data?.fecha);
+  const crudo = data?.navCierre;
+  const serie = (state.historial[fundId] || []).filter(p => !fecha || p.fecha < fecha);
+  const prev  = serie.length ? serie[serie.length - 1] : null;
+  let vcp = crudo > 0 ? crudo : null, escalaOk = true;
+  if (vcp && prev?.vcp > 0) {
+    escalaOk = false;
+    for (const k of [1, 1000, 0.001, 100, 0.01]) {
+      if (Math.abs((crudo / k) / prev.vcp - 1) < 0.25) { vcp = crudo / k; escalaOk = true; break; }
+    }
+  }
+  const varPrev = vcp && prev?.vcp > 0 ? vcp / prev.vcp - 1 : null;
+  return { fecha, vcp, prev, varPrev, escalaOk };
+}
+
+async function guardarVcpHistorial(fundId, vh) {
+  if (!vh?.fecha || !(vh.vcp > 0)) return false;
+  const r = await fetch(`${SB_URL}/vcp_historial?on_conflict=fund_id,fecha,clase`, {
+    method: 'POST',
+    headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify({ fund_id: fundId, fecha: vh.fecha, clase: 'A', vcp: vh.vcp, fuente: 'pdf' }),
+  });
+  if (!r.ok) throw new Error('vcp_historial ' + r.status);
+  // Actualizar en memoria (reemplaza si ya existía la fecha)
+  const serie = (state.historial[fundId] || []).filter(p => p.fecha !== vh.fecha);
+  serie.push({ fecha: vh.fecha, vcp: vh.vcp, pn: null });
+  serie.sort((a, b) => a.fecha.localeCompare(b.fecha));
+  state.historial[fundId] = serie;
+  return true;
+}
+
 async function cargarFxAyer() {
   try {
     const hoy = new Date().toISOString().slice(0, 10);
@@ -933,6 +995,8 @@ const state = {
   breakdownBase:   'pn',  // 'pn' (PN total) | 'fin' (PN − bienes de cambio) | 'sub' (subtotal cartera)
   yahooMap:        {},    // { symbol: priceUSD } desde Yahoo Finance
   coveredCalls:    {},    // { [fundId]: [{id, ticker_stock, ticker_call, nombre}] }
+  historial:       {},    // { [fundId]: [{fecha:'YYYY-MM-DD', vcp, pn}] } — VCP Clase A, orden asc
+  histRange:       'TODO',// '1M' | '3M' | '6M' | 'YTD' | '1A' | 'TODO'
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1282,6 +1346,173 @@ function renderBreakdownPanel(fundId) {
     </div>`;
 }
 
+// ── HISTORIAL DE VCP ─────────────────────────────────────────────────
+const HIST_RANGES = [['1M','1M'],['3M','3M'],['6M','6M'],['YTD','YTD'],['1A','1 año'],['TODO','Todo']];
+let _histChart = null; // datos del gráfico visible, para el hover
+
+function fDiaHist(iso, largo) {
+  return iso.slice(8, 10) + '/' + iso.slice(5, 7) + '/' + (largo ? iso.slice(0, 4) : iso.slice(2, 4));
+}
+function isoLocal(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+// Último punto con fecha <= iso
+function puntoAl(serie, iso) {
+  let r = null;
+  for (const p of serie) { if (p.fecha <= iso) r = p; else break; }
+  return r;
+}
+function setHistRange(r) { state.histRange = r; render(); }
+
+function rendimientosHist(serie) {
+  const last = serie[serie.length - 1];
+  const d    = new Date(last.fecha + 'T12:00:00');
+  const y = d.getFullYear(), m = d.getMonth();
+  const vs = base => base && base.vcp > 0 && base !== last ? last.vcp / base.vcp - 1 : null;
+  return {
+    last,
+    dia: vs(serie[serie.length - 2]),
+    mtd: vs(puntoAl(serie, isoLocal(new Date(y, m, 0)))),          // cierre del mes anterior
+    ytd: vs(puntoAl(serie, `${y - 1}-12-31`)),                       // cierre del año anterior
+    a12: vs(puntoAl(serie, isoLocal(new Date(y - 1, m, d.getDate())))),
+    ini: vs(serie[0]),
+  };
+}
+
+function inicioRango(lastIso, r) {
+  const d = new Date(lastIso + 'T12:00:00');
+  if (r === 'YTD') return `${d.getFullYear() - 1}-12-31`;
+  const meses = { '1M': 1, '3M': 3, '6M': 6, '1A': 12 }[r];
+  if (!meses) return null;
+  return isoLocal(new Date(d.getFullYear(), d.getMonth() - meses, d.getDate()));
+}
+
+function renderHistorial(fundId) {
+  const serie = state.historial[fundId] || [];
+  if (serie.length < 2) return '';
+  const cfg   = FUNDS_CONFIG[fundId] || {};
+  const color = cfg.color || '#A6E635';
+  const R     = rendimientosHist(serie);
+
+  // ── Tiles de rendimiento
+  const tile = (label, v) => `
+    <div style="min-width:86px">
+      <div class="metric-label">${label}</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:700;color:${v == null ? '#5A5A60' : Math.abs(v) < 5e-5 ? '#9A9AA0' : v > 0 ? '#2E9E2A' : '#D33A3F'}">${v == null ? '—' : fPct(v)}</div>
+    </div>`;
+
+  // ── Serie del rango elegido
+  const desde = inicioRango(R.last.fecha, state.histRange);
+  let pts = serie;
+  if (desde) {
+    const base = puntoAl(serie, desde);           // incluir el punto base del período
+    pts = serie.filter(p => p.fecha > desde);
+    if (base) pts = [base, ...pts];
+  }
+  if (pts.length < 2) pts = serie.slice(-2);
+  const rendRango = pts[pts.length - 1].vcp / pts[0].vcp - 1;
+
+  // ── Geometría
+  const W = 1000, H = 240, ml = 64, mr = 16, mt = 12, mb = 28;
+  const iw = W - ml - mr, ih = H - mt - mb;
+  const vals = pts.map(p => p.vcp);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = (hi - lo) * 0.08 || hi * 0.005;
+  lo -= pad; hi += pad;
+  const X = i => ml + (pts.length === 1 ? 0 : i / (pts.length - 1) * iw);
+  const Y = v => mt + (1 - (v - lo) / (hi - lo)) * ih;
+  _histChart = { fundId, pts, X, Y, W, H, ml, mr, mt, mb };
+
+  const path = pts.map((p, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(p.vcp).toFixed(1)).join(' ');
+  const area = path + ` L${X(pts.length - 1).toFixed(1)} ${mt + ih} L${ml} ${mt + ih} Z`;
+
+  const yTicks = [0, 1, 2, 3].map(k => lo + (hi - lo) * (k + 0.5) / 4);
+  const grid = yTicks.map(v => `
+    <line x1="${ml}" x2="${W - mr}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+    <text x="${ml - 8}" y="${(Y(v) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#5A5A60" font-family="JetBrains Mono, monospace">${f4(v)}</text>`).join('');
+  const nX = Math.min(6, pts.length);
+  const xIdx = [...new Set(Array.from({ length: nX }, (_, k) => Math.round(k * (pts.length - 1) / (nX - 1 || 1))))];
+  const xLabels = xIdx.map(i => `
+    <text x="${X(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === pts.length - 1 ? 'end' : 'middle'}" font-size="11" fill="#5A5A60">${fDiaHist(pts[i].fecha)}</text>`).join('');
+  const lastI = pts.length - 1;
+
+  const rangeBtns = HIST_RANGES.map(([k, label]) => {
+    const active = state.histRange === k;
+    return `<button onclick="setHistRange('${k}')"
+      style="padding:4px 10px;border-radius:7px;font-size:11px;font-weight:700;font-family:inherit;cursor:pointer;
+             background:${active ? 'rgba(166,230,53,0.15)' : 'rgba(255,255,255,0.05)'};
+             border:1px solid ${active ? 'rgba(166,230,53,0.4)' : 'rgba(255,255,255,0.08)'};
+             color:${active ? '#A6E635' : '#9A9AA0'}">${label}</button>`;
+  }).join('');
+
+  return `
+    <div style="background:#161618;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+        <div>
+          <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:6px">Evolución cuotaparte · Clase A</div>
+          <div style="display:flex;align-items:baseline;gap:10px">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800">${f4(R.last.vcp)}</span>
+            <span style="font-size:12px;color:#9A9AA0">cierre ${fDiaHist(R.last.fecha, true)}</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:18px;flex-wrap:wrap">
+          ${tile('Día', R.dia)}${tile('Mes', R.mtd)}${tile('Año', R.ytd)}${tile('12 meses', R.a12)}${tile('Desde inicio', R.ini)}
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <div style="display:flex;gap:5px;flex-wrap:wrap">${rangeBtns}</div>
+        <div style="font-size:12px;color:#9A9AA0">Período: <strong style="font-family:'JetBrains Mono',monospace;color:${rendRango >= 0 ? '#2E9E2A' : '#D33A3F'}">${fPct(rendRango)}</strong></div>
+      </div>
+      <div id="hist-wrap" style="position:relative">
+        <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img"
+             aria-label="Evolución del valor de cuotaparte Clase A, ${fDiaHist(pts[0].fecha, true)} a ${fDiaHist(pts[lastI].fecha, true)}">
+          ${grid}
+          <path d="${area}" fill="${color}" opacity="0.07"/>
+          <path d="${path}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+          <circle cx="${X(lastI).toFixed(1)}" cy="${Y(pts[lastI].vcp).toFixed(1)}" r="4" fill="${color}" stroke="#161618" stroke-width="2"/>
+          ${xLabels}
+          <g id="hist-hover" style="display:none;pointer-events:none">
+            <line id="hist-cross" y1="${mt}" y2="${mt + ih}" stroke="rgba(255,255,255,0.25)" stroke-width="1"/>
+            <circle id="hist-dot" r="5" fill="${color}" stroke="#161618" stroke-width="2"/>
+          </g>
+          <rect x="${ml}" y="${mt}" width="${iw}" height="${ih}" fill="transparent"
+                onmousemove="histHover(event)" onmouseleave="histLeave()" ontouchmove="histHover(event)"/>
+        </svg>
+        <div id="hist-tip" style="display:none;position:absolute;top:0;pointer-events:none;background:#1A1A20;border:1px solid rgba(255,255,255,0.14);border-radius:8px;padding:7px 10px;font-size:12px;white-space:nowrap;box-shadow:0 6px 20px rgba(0,0,0,0.4)"></div>
+      </div>
+    </div>`;
+}
+
+function histHover(ev) {
+  const c = _histChart; if (!c) return;
+  const svg = ev.currentTarget.ownerSVGElement;
+  const box = svg.getBoundingClientRect();
+  const cx  = (ev.touches ? ev.touches[0].clientX : ev.clientX);
+  const sx  = (cx - box.left) / box.width * c.W;
+  const n   = c.pts.length;
+  const i   = Math.max(0, Math.min(n - 1, Math.round((sx - c.ml) / (c.W - c.ml - c.mr) * (n - 1))));
+  const p   = c.pts[i], px = c.X(i), py = c.Y(p.vcp);
+  document.getElementById('hist-hover').style.display = '';
+  const cross = document.getElementById('hist-cross'); cross.setAttribute('x1', px); cross.setAttribute('x2', px);
+  const dot = document.getElementById('hist-dot'); dot.setAttribute('cx', px); dot.setAttribute('cy', py);
+  const prev = i > 0 ? c.pts[i - 1] : null;
+  const vd   = prev ? p.vcp / prev.vcp - 1 : null;
+  const vr   = p.vcp / c.pts[0].vcp - 1;
+  const tip  = document.getElementById('hist-tip');
+  tip.innerHTML = `<div style="color:#9A9AA0;margin-bottom:3px">${fDiaHist(p.fecha, true)}</div>
+    <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:14px;color:#E5E5E7">${f4(p.vcp)}</div>
+    <div style="color:#9A9AA0;margin-top:2px">Día <span style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${vd == null ? '—' : fPct(vd)}</span>
+      · Período <span style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${fPct(vr)}</span></div>`;
+  tip.style.display = '';
+  const wrapW = box.width, left = px / c.W * wrapW;
+  const tw = tip.offsetWidth;
+  tip.style.left = Math.max(0, Math.min(wrapW - tw, left + 12 > wrapW - tw ? left - tw - 12 : left + 12)) + 'px';
+}
+function histLeave() {
+  const g = document.getElementById('hist-hover'); if (g) g.style.display = 'none';
+  const t = document.getElementById('hist-tip');   if (t) t.style.display = 'none';
+}
+
 // ── FONDO DETALLE ────────────────────────────────────────────────────
 function renderFondo(fundId) {
   const cfg = FUNDS_CONFIG[fundId];
@@ -1477,6 +1708,7 @@ function renderFondo(fundId) {
         </div>
       </div>
 
+      ${renderHistorial(fundId)}
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
         <!-- Breakdown buttons -->
         <div style="display:flex;gap:6px">
@@ -2228,13 +2460,15 @@ async function init() {
   render(); // pantalla de carga
 
   try {
-    const [fundsConfig, meta, holdings, fxAyer] = await Promise.all([
+    const [fundsConfig, meta, holdings, fxAyer, , historial] = await Promise.all([
       cargarFunds(),
       cargarMeta(),
       cargarHoldings(),
       cargarFxAyer(),
       cargarCoveredCalls(),
+      cargarHistorial(),
     ]);
+    state.historial = historial;
     FUNDS_CONFIG   = fundsConfig;
     state.meta     = meta;
     state.holdings = holdings;
@@ -2607,6 +2841,19 @@ async function parsePDF(arrayBuffer) {
 function showPreviewModal(data) {
   _pdfPending = data;
   const cfg = FUNDS_CONFIG[state.fundId];
+  const vh  = data._vcpHist = prepararVcpHistorial(state.fundId, data);
+  const vhAlerta = !vh.fecha || !vh.vcp ? 'No se pudo leer fecha o VCP: no se guardará en el historial.'
+    : !vh.escalaOk ? 'El VCP no es comparable con el último guardado (' + f4(vh.prev.vcp) + '). Revisar antes de confirmar.'
+    : (vh.varPrev != null && Math.abs(vh.varPrev) > 0.03) ? 'Variación mayor a 3% contra el último valor guardado. Revisar.'
+    : '';
+  const vhBar = `
+    <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px;padding:12px 16px;background:rgba(255,255,255,0.03);border-radius:8px;border:1px solid rgba(255,255,255,0.08)">
+      <div><div class="metric-label">Historial · fecha</div><div style="font-weight:700">${vh.fecha ? fDiaHist(vh.fecha, true) : '—'}</div></div>
+      <div><div class="metric-label">VCP Clase A</div><div style="font-family:'JetBrains Mono',monospace;font-weight:700">${vh.vcp ? f4(vh.vcp) : '—'}</div></div>
+      <div><div class="metric-label">Anterior</div><div style="font-family:'JetBrains Mono',monospace;color:#9A9AA0">${vh.prev ? f4(vh.prev.vcp) + ' · ' + fDiaHist(vh.prev.fecha, true) : '—'}</div></div>
+      <div><div class="metric-label">Variación</div><div style="font-family:'JetBrains Mono',monospace;font-weight:700;color:${vh.varPrev == null ? '#9A9AA0' : vh.varPrev >= 0 ? '#2E9E2A' : '#D33A3F'}">${vh.varPrev != null ? fPct(vh.varPrev) : '—'}</div></div>
+      ${vhAlerta ? `<div style="flex-basis:100%;font-size:12px;color:#F59E0B;font-weight:600">⚠ ${vhAlerta}</div>` : ''}
+    </div>`;
   const rows = data.holdings.map(h => `
     <tr>
       <td style="padding:7px 12px"><span class="ticker-chip">${h.ticker}</span></td>
@@ -2634,6 +2881,7 @@ function showPreviewModal(data) {
       </div>
       <div class="modal-body">
         ${infoBar}
+        ${vhBar}
         <p style="color:#9A9AA0;font-size:13px;margin-bottom:14px">Se detectaron <strong style="color:#fff">${data.holdings.length} instrumentos</strong>. Al confirmar se reemplazarán todos los holdings anteriores de este fondo.</p>
         <div style="max-height:300px;overflow-y:auto;border-radius:8px;border:1px solid rgba(255,255,255,0.08)">
           <table style="width:100%;border-collapse:collapse">
@@ -2698,6 +2946,12 @@ async function confirmarCargaPDF() {
         pdfDate:     data.fecha       ?? FUNDS_CONFIG[fundId].pdfDate,
       });
     }
+
+    // 3b. Guardar VCP del cierre en el historial (si falla, no frena la carga)
+    try {
+      const vh = data._vcpHist || prepararVcpHistorial(fundId, data);
+      if (vh.escalaOk) await guardarVcpHistorial(fundId, vh);
+    } catch (e) { console.warn('[iEB] No se pudo guardar el historial:', e.message); }
 
     // 4. Actualizar ajustes en memoria (también persistido en Supabase arriba)
     if (data.ajustes && data.ajustes.length > 0) AJUSTES[fundId] = data.ajustes;
