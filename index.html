@@ -803,6 +803,55 @@ async function cargarHistorial() {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// OPCIONES (puts vendidos / covered calls)
+// ═══════════════════════════════════════════════════════════════════
+async function cargarOpciones() {
+  try {
+    const rows = await sbGet('/opciones?select=*&order=vencimiento.asc,papel.asc,strike.asc');
+    const out = {};
+    for (const r of rows) (out[r.fund_id] = out[r.fund_id] || []).push(r);
+    return out;
+  } catch (e) {
+    console.warn('[iEB] cargarOpciones error (¿existe la tabla opciones?):', e.message);
+    return {};
+  }
+}
+
+const optSymbol = o => (o.live_symbol || o.papel || '').trim().toUpperCase();
+
+// Precio del subyacente en USD cable (NYSE/Nasdaq) SIN ajustar por canje a MEP.
+// 1° data912 usa_stocks / usa_adrs · 2° Yahoo (edge function) para lo que falte.
+async function fetchPreciosSubyacentes() {
+  const symbols = [...new Set(Object.values(state.opciones).flat().map(optSymbol).filter(Boolean))];
+  if (!symbols.length) return;
+  let usMap = state.usMap;
+  if (!usMap || !Object.keys(usMap).length) {
+    usMap = {};
+    const [a, b] = await Promise.all([
+      fetch('https://data912.com/live/usa_stocks').then(r => r.json()).catch(() => []),
+      fetch('https://data912.com/live/usa_adrs').then(r => r.json()).catch(() => []),
+    ]);
+    for (const o of [...(a || []), ...(b || [])]) if (o && o.symbol) usMap[o.symbol] = o;
+  }
+  const px = {};
+  for (const s of symbols) if (usMap[s]?.c > 0) px[s] = { px: usMap[s].c, src: 'live' };
+  const faltan = symbols.filter(s => !px[s]);
+  if (faltan.length) {
+    try {
+      const yData = await fetch('https://xyoxonwufbrorwsoyyce.supabase.co/functions/v1/yahoo-prices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY },
+        body: JSON.stringify({ symbols: faltan }),
+      }).then(r => r.json()).catch(() => null);
+      for (const q of (yData?.quoteResponse?.result || [])) {
+        if (q.symbol && q.regularMarketPrice > 0) px[q.symbol.toUpperCase()] = { px: q.regularMarketPrice, src: 'yahoo' };
+      }
+    } catch (e) { console.warn('[iEB] Yahoo subyacentes:', e); }
+  }
+  state.optPx = { ...state.optPx, ...px };
+}
+
 // '20/10/2026' → '2026-10-20'
 function fechaPDFaISO(f) {
   const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec((f || '').trim());
@@ -885,6 +934,7 @@ async function actualizarPrecios() {
     state.usMap           = live.usMap;
     state.yahooMap        = live.yahooMap || {};
     state.lastPriceUpdate = new Date();
+    await fetchPreciosSubyacentes().catch(() => {});
   } finally {
     state.updatingPrices = false;
     render();
@@ -997,6 +1047,9 @@ const state = {
   coveredCalls:    {},    // { [fundId]: [{id, ticker_stock, ticker_call, nombre}] }
   historial:       {},    // { [fundId]: [{fecha:'YYYY-MM-DD', vcp, pn}] } — VCP Clase A, orden asc
   histRange:       'TODO',// '1M' | '3M' | '6M' | 'YTD' | '1A' | 'TODO'
+  opciones:        {},    // { [fundId]: [filas de la tabla `opciones`] }
+  optPx:           {},    // { [symbol]: { px, src: 'live'|'yahoo' } } — USD cable, sin canje
+  optVerCerradas:  false,
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1513,6 +1566,334 @@ function histLeave() {
   const t = document.getElementById('hist-tip');   if (t) t.style.display = 'none';
 }
 
+// ── PANEL DE OPCIONES ────────────────────────────────────────────────
+// Réplica del cuadro "CC-Puts" (Hoja3), con estas definiciones:
+//   Px compra   PUT: strike − prima  |  CALL: costo acción − prima   (precio efectivo)
+//   Px a tomar  mín(strike, mercado)  → valor al vencimiento a precio de hoy
+//   Resultado   cantidad × (px a tomar − px compra)
+//   Cobertura   (mercado − px compra) / mercado  → cuánto puede caer hasta el breakeven
+//   Dist. strike mercado / strike − 1
+//   TNA         (strike − px compra) / px compra × 365 / días(operación→vto)
+//               PUT = rendimiento de la prima sobre la caja neta comprometida
+//               CALL = rendimiento máximo si ejercen
+//   TEA         (1 + rend. del período)^(365 / días) − 1
+//   Cash        PUT: + cantidad × strike (caja a poner si ejercen)
+//               CALL: − cantidad × strike (caja que entra si ejercen)
+//   Ejercible   PUT: mercado < strike | CALL: mercado > strike (automático)
+const diasEntre = (a, b) => Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 86400000);
+
+function calcOpcion(o) {
+  const E = +o.cantidad || 0, K = +o.strike || 0, p = +o.prima || 0;
+  const isPut = o.tipo === 'PUT';
+  const costo = o.costo_accion != null ? +o.costo_accion : null;
+  const F     = isPut ? K - p : (costo != null ? costo - p : null);
+  const manual = o.precio_manual != null && +o.precio_manual > 0 ? +o.precio_manual : null;
+  const pxO   = manual != null ? { px: manual, src: 'manual' } : (state.optPx[optSymbol(o)] || null);
+  const M     = pxO?.px ?? null;
+  const I     = M != null ? Math.min(K, M) : null;
+  const J     = I != null && F != null ? E * (I - F) : null;
+  const cob   = M && F != null ? (M - F) / M : null;
+  const dist  = M && K ? M / K - 1 : null;
+  const itm   = M != null ? (isPut ? M < K : M > K) : null;
+  const hoy   = isoLocal(new Date());
+  const dias  = o.vencimiento ? diasEntre(hoy, o.vencimiento) : null;
+  const plazo = o.fecha_operacion && o.vencimiento ? diasEntre(o.fecha_operacion, o.vencimiento) : null;
+  const rPer  = F > 0 ? (K - F) / F : null;
+  const tna   = plazo > 0 && rPer != null ? rPer * 365 / plazo : null;
+  const tea   = plazo > 0 && rPer != null ? Math.pow(1 + rPer, 365 / plazo) - 1 : null;
+  const cash  = (isPut ? 1 : -1) * E * K;
+  return { E, K, p, F, M, src: pxO?.src, I, J, cob, dist, itm, dias, plazo, tna, tea, cash, isPut, primaTotal: E * p };
+}
+
+function renderOpciones(fundId) {
+  const todas = state.opciones[fundId] || [];
+  const lista = todas.filter(o => state.optVerCerradas || o.estado !== 'CERRADA');
+  const abiertas = todas.filter(o => o.estado !== 'CERRADA').map(o => ({ o, c: calcOpcion(o) }));
+
+  // ── Resumen (solo abiertas)
+  const sum = f => abiertas.reduce((s, x) => s + (f(x) || 0), 0);
+  const primas      = sum(x => x.c.primaTotal);
+  const resultado   = sum(x => x.c.J);
+  const compPuts    = sum(x => x.c.isPut ? x.c.cash : 0);
+  const compPutsItm = sum(x => x.c.isPut && x.c.itm ? x.c.cash : 0);
+  const cashCallsItm = sum(x => !x.c.isPut && x.c.itm ? -x.c.cash : 0);
+  const liquidez = calcMontosCartera(fundId).filter(i => esLiquidez(i.meta)).reduce((s, i) => s + i.monto, 0);
+  const coberturaLiq = compPuts > 0 ? liquidez / compPuts : null;
+  const usd = n => (n < 0 ? '−' : '') + 'USD ' + _ar0.format(Math.round(Math.abs(n)));
+  const pctC = v => v == null ? '—' : fPct(v);
+  const colorN = v => v == null || Math.abs(v) < 1e-9 ? '#9A9AA0' : v > 0 ? '#2E9E2A' : '#D33A3F';
+  const tile = (label, val, sub, color) => `
+    <div style="min-width:130px">
+      <div class="metric-label">${label}</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:700;color:${color || '#E5E5E7'}">${val}</div>
+      ${sub ? `<div style="font-size:11px;color:#5A5A60;margin-top:2px">${sub}</div>` : ''}
+    </div>`;
+
+  const chip = (txt, c) => `<span style="display:inline-block;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;white-space:nowrap">${txt}</span>`;
+  const th = (t, num) => `<th${num ? ' class="num"' : ''}>${t}</th>`;
+
+  const rows = lista.map(o => {
+    const c = calcOpcion(o);
+    const cerrada = o.estado === 'CERRADA';
+    const alertas = [];
+    if (!cerrada && c.dias != null && c.dias < 0)      alertas.push(chip('Vencida', '#D33A3F'));
+    else if (!cerrada && c.dias != null && c.dias <= 7) alertas.push(chip('Vence en ' + c.dias + 'd', '#F59E0B'));
+    const manualTip = o.precio_manual_at ? 'Precio manual cargado el ' + new Date(o.precio_manual_at).toLocaleString('es-AR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }) : 'Precio manual';
+    const pxBadge = c.M == null ? '' : c.src === 'manual'
+      ? ` <span class="badge" title="${manualTip}" style="background:rgba(245,158,11,0.12);color:#F59E0B;border:1px solid rgba(245,158,11,0.35)">MANUAL</span>`
+      : c.src === 'live' ? ' <span class="badge badge-live">LIVE</span>' : ' <span class="badge badge-hold">YAHOO</span>';
+    const pxEdit = `<button onclick="abrirPrecioManual('${fundId}', ${o.id})" title="Modificar precio a mano" style="background:none;border:none;color:#5A5A60;cursor:pointer;font-size:12px;padding:0 0 0 4px">✎</button>`;
+    return `
+      <tr style="${cerrada ? 'opacity:0.45' : ''}">
+        <td>${chip(c.isPut ? 'PUT' : 'CALL', c.isPut ? '#38BDF8' : '#A78BFA')}</td>
+        <td><span class="ticker-chip">${o.papel}</span>${o.notas ? `<span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">${o.notas}</span>` : ''}</td>
+        <td class="num">${fNum(c.E)}</td>
+        <td class="num">${f2(c.p)}</td>
+        <td class="num">${c.F != null ? f2(c.F) : '—'}</td>
+        <td class="num">${f2(c.K)}</td>
+        <td class="num" style="white-space:nowrap">${c.M != null ? f2(c.M) + pxBadge : '—'}${pxEdit}</td>
+        <td class="num" style="color:#9A9AA0">${pctC(c.dist)}</td>
+        <td class="num">${c.I != null ? f2(c.I) : '—'}</td>
+        <td class="num" style="color:${colorN(c.J)}">${c.J != null ? usd(c.J) : '—'}</td>
+        <td class="num" style="color:${colorN(c.cob)}">${pctC(c.cob)}</td>
+        <td class="num">${c.tna != null ? f2(c.tna * 100) + '%' : '—'}</td>
+        <td class="num">${c.tea != null ? f2(c.tea * 100) + '%' : '—'}</td>
+        <td class="num">${o.vencimiento ? fDiaHist(o.vencimiento) : '—'}<span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">${c.dias != null ? c.dias + ' días' : ''}</span></td>
+        <td class="num">${usd(c.cash)}</td>
+        <td style="text-align:center">${c.itm == null ? '—' : c.itm ? chip('SÍ', '#F59E0B') : '<span style="color:#5A5A60;font-size:11px">No</span>'} ${alertas.join(' ')}</td>
+        <td style="white-space:nowrap">
+          <button onclick="abrirOpcion('${fundId}', ${o.id})" title="Editar" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#C0C0C8;padding:3px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit">✎</button>
+          <button onclick="confirmarEliminarOpcion('${fundId}', ${o.id})" title="Eliminar" style="background:rgba(211,58,63,0.1);border:1px solid rgba(211,58,63,0.3);color:#F87171;padding:3px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit">✕</button>
+        </td>
+      </tr>`;
+  }).join('');
+
+  const totalCash = sum(x => x.c.cash);
+  const btn = (label, onclick, primary) => `<button onclick="${onclick}" class="upload-btn" style="${primary ? 'background:rgba(166,230,53,0.1);border:1px solid rgba(166,230,53,0.3);color:#A6E635' : 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)'}">${label}</button>`;
+
+  return `
+    <div style="background:#161618;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+        <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px">Opciones · Puts y Covered Calls <span style="text-transform:none;letter-spacing:0;font-weight:600;color:#5A5A60">· precios USD cable, sin ajuste a MEP</span></div>
+        <div style="display:flex;gap:8px">
+          ${btn(state.optVerCerradas ? 'Ocultar cerradas' : 'Ver cerradas', 'toggleOptCerradas()')}
+          ${btn('+ Nueva opción', `abrirOpcion('${fundId}')`, true)}
+        </div>
+      </div>
+      ${abiertas.length ? `
+      <div style="display:flex;gap:22px;flex-wrap:wrap;margin-bottom:14px">
+        ${tile('Primas cobradas', usd(primas))}
+        ${tile('Resultado al vto', usd(resultado), 'a precios de hoy', colorN(resultado))}
+        ${tile('Compromiso puts', usd(compPuts), compPutsItm > 0 ? usd(compPutsItm) + ' ejercibles hoy' : 'ninguno ejercible hoy')}
+        ${tile('Cash si ejercen calls', usd(cashCallsItm), 'solo calls ejercibles hoy')}
+        ${tile('Liquidez / compromiso puts', coberturaLiq != null ? f2(coberturaLiq * 100) + '%' : '—', 'liquidez ' + usd(liquidez), coberturaLiq == null ? null : coberturaLiq >= 1 ? '#2E9E2A' : '#F59E0B')}
+      </div>` : ''}
+      ${lista.length ? `
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            ${th('Tipo')}${th('Papel')}${th('Cantidad', 1)}${th('Prima', 1)}${th('Px compra', 1)}${th('Strike', 1)}${th('Mercado', 1)}${th('Dist. strike', 1)}${th('Px a tomar', 1)}${th('Resultado', 1)}${th('Cobertura', 1)}${th('TNA', 1)}${th('TEA', 1)}${th('Vencimiento', 1)}${th('Cash', 1)}${th('Ejercible')}${th('')}
+          </tr></thead>
+          <tbody>${rows}</tbody>
+          <tfoot><tr style="border-top:1px solid rgba(255,255,255,0.12);font-weight:700">
+            <td colspan="9" class="denom-cell">Total abiertas</td>
+            <td class="num" style="color:${colorN(resultado)}">${usd(resultado)}</td>
+            <td colspan="4"></td>
+            <td class="num">${usd(totalCash)}</td>
+            <td colspan="2"></td>
+          </tr></tfoot>
+        </table>
+      </div>` : `<div style="color:#5A5A60;font-size:13px">No hay opciones cargadas. Usá “+ Nueva opción”.</div>`}
+    </div>`;
+}
+
+function abrirPrecioManual(fundId, id) {
+  const o = (state.opciones[fundId] || []).find(x => x.id === id);
+  if (!o) return;
+  const sym  = optSymbol(o);
+  const auto = state.optPx[sym];
+  const mismas = (state.opciones[fundId] || []).filter(x => optSymbol(x) === sym && x.estado !== 'CERRADA');
+  showModal(`
+    <div class="modal-box" style="max-width:400px">
+      <div class="modal-header">
+        <div style="font-size:16px;font-weight:800">Precio de ${sym}</div>
+        <button onclick="closeModal()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:18px">✕</button>
+      </div>
+      <div class="modal-body" style="display:grid;gap:12px">
+        <div style="font-size:12px;color:#9A9AA0">
+          Precio automático: <strong style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${auto ? f2(auto.px) + ' (' + (auto.src === 'live' ? 'data912' : 'Yahoo') + ')' : 'sin dato'}</strong>
+          ${o.precio_manual != null ? `<br>Manual actual: <strong style="font-family:'JetBrains Mono',monospace;color:#F59E0B">${f2(+o.precio_manual)}</strong>` : ''}
+        </div>
+        <div>
+          <div style="font-size:11px;color:#9A9AA0;margin-bottom:4px;font-weight:600">Precio manual (USD cable)</div>
+          <input id="pm-px" type="number" step="any" class="cms-input" style="width:100%;box-sizing:border-box;font-family:'JetBrains Mono',monospace;font-size:13px"
+                 value="${o.precio_manual ?? ''}" placeholder="${auto ? auto.px : 'ej: 158.20'}">
+        </div>
+        <div style="font-size:11px;color:#5A5A60">
+          Mientras haya precio manual se usa ese en lugar del automático.
+          ${mismas.length > 1 ? `Se aplica a las ${mismas.length} posiciones abiertas de ${sym}.` : ''}
+        </div>
+        <div id="pm-err" style="color:#D33A3F;font-size:12px;font-weight:600"></div>
+      </div>
+      <div class="modal-footer">
+        ${o.precio_manual != null ? `<button class="btn-secondary" onclick="guardarPrecioManual('${fundId}', ${id}, true)">Volver al automático</button>` : ''}
+        <button class="btn-primary" onclick="guardarPrecioManual('${fundId}', ${id}, false)">💾 Guardar</button>
+      </div>
+    </div>`);
+  setTimeout(() => document.getElementById('pm-px')?.focus(), 50);
+}
+
+async function guardarPrecioManual(fundId, id, limpiar) {
+  const o = (state.opciones[fundId] || []).find(x => x.id === id);
+  if (!o) return;
+  const err = document.getElementById('pm-err');
+  let px = null;
+  if (!limpiar) {
+    px = parseFloat((document.getElementById('pm-px')?.value || '').replace(',', '.'));
+    if (!(px > 0)) { err.textContent = 'Ingresá un precio mayor a cero.'; return; }
+  }
+  const sym = optSymbol(o);
+  const ids = (state.opciones[fundId] || [])
+    .filter(x => optSymbol(x) === sym && (x.estado !== 'CERRADA' || x.id === id))
+    .map(x => x.id);
+  try {
+    const r = await fetch(`${SB_URL}/opciones?id=in.(${ids.join(',')})`, {
+      method: 'PATCH',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ precio_manual: px, precio_manual_at: px ? new Date().toISOString() : null }),
+    });
+    if (!r.ok) throw new Error('Supabase ' + r.status + (r.status === 400 ? ' (¿corriste opciones_precio_manual.sql?)' : ''));
+    state.opciones = await cargarOpciones();
+    closeModal(); render();
+  } catch (e) {
+    err.textContent = 'No se pudo guardar: ' + e.message;
+  }
+}
+
+function toggleOptCerradas() { state.optVerCerradas = !state.optVerCerradas; render(); }
+
+function abrirOpcion(fundId, id) {
+  const o = id ? (state.opciones[fundId] || []).find(x => x.id === id) : null;
+  const v = (k, d = '') => o && o[k] != null ? o[k] : d;
+  const inp = (idf, label, val, ph, type = 'text') => `
+    <div>
+      <div style="font-size:11px;color:#9A9AA0;margin-bottom:4px;font-weight:600">${label}</div>
+      <input id="op-${idf}" type="${type}" class="cms-input" style="width:100%;box-sizing:border-box;font-family:'JetBrains Mono',monospace;font-size:12px" value="${val}" placeholder="${ph}">
+    </div>`;
+  showModal(`
+    <div class="modal-box" style="max-width:520px">
+      <div class="modal-header">
+        <div style="font-size:16px;font-weight:800">${o ? 'Editar opción' : 'Nueva opción'}</div>
+        <button onclick="closeModal()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:18px">✕</button>
+      </div>
+      <div class="modal-body" style="display:grid;gap:10px">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+          <div>
+            <div style="font-size:11px;color:#9A9AA0;margin-bottom:4px;font-weight:600">Tipo *</div>
+            <select id="op-tipo" class="cms-select" style="width:100%;box-sizing:border-box" onchange="document.getElementById('op-costo-wrap').style.display=this.value==='CALL'?'':'none'">
+              <option value="PUT" ${v('tipo') !== 'CALL' ? 'selected' : ''}>PUT vendido</option>
+              <option value="CALL" ${v('tipo') === 'CALL' ? 'selected' : ''}>CALL vendido (covered)</option>
+            </select>
+          </div>
+          ${inp('papel', 'Papel (subyacente) *', v('papel'), 'ej: NKE')}
+          ${inp('sym', 'Ticker de precio', v('live_symbol'), 'si difiere')}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+          ${inp('cant', 'Cantidad (acciones) *', v('cantidad'), 'ej: 12800', 'number')}
+          ${inp('strike', 'Strike *', v('strike'), 'ej: 40', 'number')}
+          ${inp('prima', 'Prima por acción *', v('prima'), 'ej: 0.63', 'number')}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+          <div id="op-costo-wrap" style="${v('tipo') === 'CALL' ? '' : 'display:none'}">
+            ${inp('costo', 'Costo acción *', v('costo_accion'), 'ej: 68.93', 'number')}
+          </div>
+          ${inp('fop', 'Fecha operación', v('fecha_operacion'), '', 'date')}
+          ${inp('vto', 'Vencimiento *', v('vencimiento'), '', 'date')}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 2fr;gap:10px">
+          <div>
+            <div style="font-size:11px;color:#9A9AA0;margin-bottom:4px;font-weight:600">Estado</div>
+            <select id="op-estado" class="cms-select" style="width:100%;box-sizing:border-box">
+              <option value="ABIERTA" ${v('estado') !== 'CERRADA' ? 'selected' : ''}>Abierta</option>
+              <option value="CERRADA" ${v('estado') === 'CERRADA' ? 'selected' : ''}>Cerrada / ejercida</option>
+            </select>
+          </div>
+          ${inp('notas', 'Notas', v('notas'), 'opcional')}
+        </div>
+        <div id="op-err" style="color:#D33A3F;font-size:12px;font-weight:600"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="closeModal()">Cancelar</button>
+        <button class="btn-primary" onclick="guardarOpcion('${fundId}', ${o ? o.id : 'null'})">💾 Guardar</button>
+      </div>
+    </div>`);
+}
+
+async function guardarOpcion(fundId, id) {
+  const g = k => document.getElementById('op-' + k)?.value?.trim() ?? '';
+  const num = k => g(k) === '' ? null : parseFloat(g(k).replace(',', '.'));
+  const tipo = g('tipo');
+  const row = {
+    fund_id: fundId, tipo,
+    papel: g('papel').toUpperCase(),
+    live_symbol: g('sym') ? g('sym').toUpperCase() : null,
+    cantidad: num('cant'), strike: num('strike'), prima: num('prima'),
+    costo_accion: tipo === 'CALL' ? num('costo') : null,
+    fecha_operacion: g('fop') || null, vencimiento: g('vto') || null,
+    estado: g('estado') || 'ABIERTA', notas: g('notas') || null,
+  };
+  const err = document.getElementById('op-err');
+  if (!row.papel || !(row.cantidad > 0) || !(row.strike > 0) || !(row.prima >= 0) || !row.vencimiento ||
+      (tipo === 'CALL' && !(row.costo_accion > 0))) {
+    err.textContent = 'Completá los campos con * (en CALL también el costo de la acción).';
+    return;
+  }
+  if (row.fecha_operacion && row.fecha_operacion >= row.vencimiento) {
+    err.textContent = 'La fecha de operación tiene que ser anterior al vencimiento.';
+    return;
+  }
+  try {
+    const url = id ? `${SB_URL}/opciones?id=eq.${id}` : `${SB_URL}/opciones`;
+    const r = await fetch(url, {
+      method: id ? 'PATCH' : 'POST',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify(row),
+    });
+    if (!r.ok) throw new Error('Supabase ' + r.status);
+    state.opciones = await cargarOpciones();
+    await fetchPreciosSubyacentes().catch(() => {});
+    closeModal(); render();
+  } catch (e) {
+    err.textContent = 'No se pudo guardar: ' + e.message;
+  }
+}
+
+function confirmarEliminarOpcion(fundId, id) {
+  const o = (state.opciones[fundId] || []).find(x => x.id === id);
+  if (!o) return;
+  showModal(`
+    <div class="modal-box" style="max-width:380px">
+      <div class="modal-header"><div style="font-size:16px;font-weight:800">Eliminar opción</div></div>
+      <div class="modal-body" style="color:#C0C0C8;font-size:13px">
+        ¿Eliminar ${o.tipo} ${o.papel} strike ${f2(+o.strike)} (${fNum(+o.cantidad)})?<br>
+        <span style="color:#5A5A60;font-size:12px">Si ya se ejerció o venció, conviene marcarla como “Cerrada” para conservar el registro.</span>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" onclick="closeModal()">Cancelar</button>
+        <button class="btn-primary" style="background:#D33A3F;color:#fff" onclick="eliminarOpcion('${fundId}', ${id})">Eliminar</button>
+      </div>
+    </div>`);
+}
+
+async function eliminarOpcion(fundId, id) {
+  try {
+    const r = await fetch(`${SB_URL}/opciones?id=eq.${id}`, { method: 'DELETE', headers: SB_HDR });
+    if (!r.ok) throw new Error('Supabase ' + r.status);
+    state.opciones[fundId] = (state.opciones[fundId] || []).filter(x => x.id !== id);
+  } catch (e) { console.warn('[iEB] eliminarOpcion:', e.message); }
+  closeModal(); render();
+}
+
 // ── FONDO DETALLE ────────────────────────────────────────────────────
 function renderFondo(fundId) {
   const cfg = FUNDS_CONFIG[fundId];
@@ -1709,6 +2090,7 @@ function renderFondo(fundId) {
       </div>
 
       ${renderHistorial(fundId)}
+      ${fundId === 'CICLO_NOVA' || (state.opciones[fundId] || []).length ? renderOpciones(fundId) : ''}
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
         <!-- Breakdown buttons -->
         <div style="display:flex;gap:6px">
@@ -2460,15 +2842,17 @@ async function init() {
   render(); // pantalla de carga
 
   try {
-    const [fundsConfig, meta, holdings, fxAyer, , historial] = await Promise.all([
+    const [fundsConfig, meta, holdings, fxAyer, , historial, opciones] = await Promise.all([
       cargarFunds(),
       cargarMeta(),
       cargarHoldings(),
       cargarFxAyer(),
       cargarCoveredCalls(),
       cargarHistorial(),
+      cargarOpciones(),
     ]);
     state.historial = historial;
+    state.opciones  = opciones;
     FUNDS_CONFIG   = fundsConfig;
     state.meta     = meta;
     state.holdings = holdings;
@@ -2486,6 +2870,7 @@ async function init() {
       state.yahooMap        = live.yahooMap || {};
       state.lastPriceUpdate = new Date();
     }
+    await fetchPreciosSubyacentes().catch(() => {});
     render();
 
     setInterval(async () => {
@@ -2497,6 +2882,7 @@ async function init() {
       state.usMap           = live.usMap;
       state.yahooMap        = live.yahooMap || {};
       state.lastPriceUpdate = new Date();
+      await fetchPreciosSubyacentes().catch(() => {});
       render();
     }, 10 * 60_000);
 
