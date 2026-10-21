@@ -426,6 +426,7 @@
 <body>
 <div id="app"></div>
 <input type="file" id="pdf-input" accept=".pdf" style="display:none" onchange="handlePDFUpload(this.files[0])">
+<input type="file" id="pdf-hist-input" accept=".pdf" multiple style="display:none" onchange="cargarPDFsHistoricos(this.files)">
 
 <script>
 'use strict';
@@ -1052,6 +1053,7 @@ const state = {
   optPx:           {},    // { [symbol]: { px, src: 'live'|'yahoo' } } — USD cable, sin canje
   optVerCerradas:  false,
   optAbierto:      false, // panel de opciones desplegado
+  atrib: { fundId: null, cierres: null, fx: null, loading: false, rango: '1M', grupo: 'activo', desde: '', hasta: '' },
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1102,6 +1104,8 @@ function render() {
   }
   if (state.view === 'landing') {
     root.innerHTML = renderLanding();
+  } else if (state.view === 'atrib') {
+    root.innerHTML = renderAtribucion(state.fundId);
   } else if (state.view === 'activos') {
     root.innerHTML = renderActivosPage(state.fundId);
     bindEvents();
@@ -1924,6 +1928,434 @@ async function eliminarOpcion(fundId, id) {
   closeModal(); render();
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// ATRIBUCIÓN DE PERFORMANCE
+// ═══════════════════════════════════════════════════════════════════
+// Método (buy & hold entre cierres consecutivos):
+//   contribución_i,t = signo × cantidad_i,t-1 × (P_i,t − P_i,t-1) / PN_t-1
+//   PN_t-1 = Σ montos (cortos con signo −) + ajustes del PDF
+//   Efecto TC: si la moneda del activo ≠ la del fondo, se separa la parte que
+//   viene de la variación del MEP (fx_history) de la que viene del precio local.
+//   Residuo_t = rendimiento oficial (NAV_t / NAV_t-1 − 1) − Σ contribuciones
+//             → honorarios, suscripciones/rescates, compras/ventas en el día, etc.
+// Varios días se encadenan ponderando cada día por el crecimiento acumulado
+// previo: Σ_t R_t × Π_{s<t}(1+R_s) = Π(1+R_t) − 1  → la suma cierra exacto.
+const ATRIB_RANGOS = [['HOY', 'Hoy (en vivo)'], ['1S', '1 semana'], ['1M', '1 mes'], ['3M', '3 meses'], ['CUSTOM', 'Personalizado']];
+const ATRIB_GRUPOS = [['activo', 'Activo'], ['tipo', 'Tipo'], ['cat', 'Categoría'], ['moneda', 'Moneda']];
+
+async function sbGetAll(pathBase) {
+  const out = [], PAGE = 1000;
+  for (let offset = 0; ; offset += PAGE) {
+    const rows = await sbGet(`${pathBase}&limit=${PAGE}&offset=${offset}`);
+    out.push(...rows);
+    if (rows.length < PAGE) break;
+  }
+  return out;
+}
+
+async function cargarCierres(fundId) {
+  try {
+    const rows = await sbGetAll(`/cierres_fondo?select=fecha,holdings,ajustes,nav&fund_id=eq.${fundId}&order=fecha.asc`);
+    return rows.map(r => ({ fecha: r.fecha, holdings: r.holdings || [], ajustes: r.ajustes || [], nav: r.nav != null ? +r.nav : null }));
+  } catch (e) {
+    console.warn('[iEB] cargarCierres (¿existe la tabla cierres_fondo?):', e.message);
+    return [];
+  }
+}
+
+async function cargarFxSerie() {
+  try {
+    const rows = await sbGetAll('/fx_history?select=fecha,mep&order=fecha.asc');
+    return rows.filter(r => +r.mep > 0).map(r => ({ fecha: r.fecha, mep: +r.mep }));
+  } catch (e) { return []; }
+}
+function mepAl(fecha) {
+  let r = 0;
+  for (const p of (state.atrib.fx || [])) { if (p.fecha <= fecha) r = p.mep; else break; }
+  return r;
+}
+
+// Cierres guardados + el del último PDF cargado (si todavía no está guardado)
+function cierresFondo(fundId) {
+  const lista = [...(state.atrib.cierres || [])];
+  const cfg = FUNDS_CONFIG[fundId] || {};
+  const f = fechaPDFaISO(cfg.pdfDate);
+  if (f && !lista.some(c => c.fecha === f) && (state.holdings[fundId] || []).length) {
+    lista.push({ fecha: f, holdings: state.holdings[fundId], ajustes: AJUSTES[fundId] || [], nav: cfg.navCierre || null, _local: true });
+    lista.sort((a, b) => a.fecha.localeCompare(b.fecha));
+  }
+  return lista;
+}
+
+async function guardarCierre(fundId, data) {
+  const fecha = fechaPDFaISO(data.fecha);
+  if (!fecha) throw new Error('el PDF no tiene fecha legible');
+  const row = {
+    fund_id: fundId, fecha,
+    holdings: data.holdings.map(h => ({ ticker: h.ticker, cantidad: h.cantidad, cierre: h.cierre })),
+    ajustes: data.ajustes || [], nav: data.navCierre || null, cuotapartes: data.cuotapartes || null,
+  };
+  const r = await fetch(`${SB_URL}/cierres_fondo?on_conflict=fund_id,fecha`, {
+    method: 'POST',
+    headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify(row),
+  });
+  if (!r.ok) throw new Error('cierres_fondo ' + r.status);
+  if (state.atrib.fundId === fundId && state.atrib.cierres) {
+    const l = state.atrib.cierres.filter(c => c.fecha !== fecha);
+    l.push({ fecha, holdings: row.holdings, ajustes: row.ajustes, nav: row.nav });
+    l.sort((a, b) => a.fecha.localeCompare(b.fecha));
+    state.atrib.cierres = l;
+  }
+  return fecha;
+}
+
+function atribClave(fundId, ticker, grupo) {
+  const meta = state.meta[fundId]?.[ticker];
+  if (grupo === 'tipo')   return meta?.tipo || 'Otros';
+  if (grupo === 'cat')    return meta?.categoria || 'Sin categoría';
+  if (grupo === 'moneda') return meta?.moneda || 'ARS';
+  const cc = (state.coveredCalls[fundId] || []).find(c => c.ticker_stock === ticker || c.ticker_call === ticker);
+  if (cc) return cc.nombre || (cc.ticker_stock.split(' ')[0] + ' CC');
+  return ticker;
+}
+
+// Un paso entre dos cierres (a → b)
+function atribPaso(fundId, a, b, mepA, mepB) {
+  const fondoMon = FUNDS_CONFIG[fundId]?.moneda || 'ARS';
+  const meta  = state.meta[fundId] || {};
+  const signo = t => SHORT_OPT_TIPOS.includes(meta[t]?.tipo) ? -1 : 1;
+  const valido = h => meta[h.ticker]?.tipo !== 'Futuro de Dólar';
+  const hA  = a.holdings.filter(valido);
+  const mapB = new Map(b.holdings.map(h => [h.ticker, h]));
+  const pnA = hA.reduce((s, h) => s + signo(h.ticker) * h.cantidad * h.cierre, 0)
+            + (a.ajustes || []).reduce((s, x) => s + (+x.val || 0), 0);
+  const items = [];
+  if (!(pnA > 0)) return { R: 0, items, pnA };
+  for (const h of hA) {
+    const w  = signo(h.ticker) * h.cantidad * h.cierre / pnA;
+    const hb = mapB.get(h.ticker);
+    if (!hb || !(h.cierre > 0) || !(hb.cierre > 0)) { items.push({ ticker: h.ticker, w, r: null, precio: 0, fx: 0, sinDato: true }); continue; }
+    const r = hb.cierre / h.cierre - 1;
+    // Cauciones / MM: un salto > 1% entre cierres es renovación con otro capital, no rendimiento
+    if (esLiquidez(meta[h.ticker]) && Math.abs(r) > 0.01) { items.push({ ticker: h.ticker, w, r: null, precio: 0, fx: 0, sinDato: true }); continue; }
+    const mon = meta[h.ticker]?.moneda || fondoMon;
+    let rfx = 0;
+    if (mepA > 0 && mepB > 0) {
+      if (fondoMon === 'USD' && mon === 'ARS') rfx = mepA / mepB - 1;
+      else if (fondoMon === 'ARS' && mon === 'USD') rfx = mepB / mepA - 1;
+    }
+    items.push({ ticker: h.ticker, w, r, precio: w * (r - rfx), fx: w * rfx });
+  }
+  const expl = items.reduce((s, i) => s + i.precio + i.fx, 0);
+  const R = a.nav > 0 && b.nav > 0 ? b.nav / a.nav - 1 : expl;
+  return { R, items, pnA };
+}
+
+function atribAcumular(fundId, pasos, grupo) {
+  const acc = new Map();
+  let G = 1, resid = 0;
+  for (const paso of pasos) {
+    let expl = 0;
+    for (const it of paso.items) {
+      const k = atribClave(fundId, it.ticker, grupo);
+      const e = acc.get(k) || { clave: k, precio: 0, fx: 0, wSum: 0, tickers: new Set(), crec: 1, sinDato: false, corto: it.w < 0 };
+      e.precio += G * it.precio; e.fx += G * it.fx; e.wSum += it.w;
+      e.tickers.add(it.ticker);
+      if (it.r != null) e.crec *= (1 + it.r); else e.sinDato = true;
+      acc.set(k, e);
+      expl += it.precio + it.fx;
+    }
+    resid += G * (paso.R - expl);
+    G *= (1 + paso.R);
+  }
+  const n = pasos.length || 1;
+  const filas = [...acc.values()].map(e => ({
+    clave: e.clave, precio: e.precio, fx: e.fx, total: e.precio + e.fx,
+    peso: e.wSum / n,
+    rend: e.tickers.size === 1 && !e.sinDato ? e.crec - 1 : null,
+    sinDato: e.sinDato, corto: e.corto && e.tickers.size === 1,
+  }));
+  filas.sort((x, y) => y.total - x.total);
+  return {
+    filas, resid, total: G - 1,
+    precio: filas.reduce((s, f) => s + f.precio, 0),
+    fx: filas.reduce((s, f) => s + f.fx, 0),
+  };
+}
+
+function atribCalcular(fundId) {
+  const A = state.atrib;
+  if (A.rango === 'HOY') {
+    const cfg = FUNDS_CONFIG[fundId] || {};
+    const moneda = cfg.moneda || 'ARS';
+    const hold = state.holdings[fundId] || [];
+    const meta = state.meta[fundId] || {};
+    const a = { fecha: 'cierre', holdings: hold, ajustes: AJUSTES[fundId] || [], nav: cfg.navCierre };
+    const b = { fecha: 'hoy', holdings: hold.map(h => {
+      const m = meta[h.ticker];
+      const { price } = calcPrecio(h, m, moneda, state.fxLive, state.fxAyer, state.marketMap, state.usMap, state.canje, state.yahooMap);
+      return { ticker: h.ticker, cantidad: h.cantidad, cierre: price / (m?.lamina || 1) };
+    }), nav: (cfg.navCierre || 0) * (1 + calcNAV(fundId).rend) };
+    const paso = atribPaso(fundId, a, b, state.fxAyer, state.fxLive || state.fxAyer);
+    return { ok: true, desde: fechaPDFaISO(cfg.pdfDate), hasta: null, pasos: 1, ...atribAcumular(fundId, [paso], A.grupo), live: true };
+  }
+  const cierres = cierresFondo(fundId);
+  if (cierres.length < 2) return { ok: false, motivo: 'pocos', cierres };
+  const ultimo = cierres[cierres.length - 1].fecha;
+  let hasta = ultimo, desde;
+  if (A.rango === 'CUSTOM') { hasta = A.hasta || ultimo; desde = A.desde || cierres[0].fecha; }
+  else {
+    const d = new Date(ultimo + 'T12:00:00');
+    if (A.rango === '1S') d.setDate(d.getDate() - 7);
+    else d.setMonth(d.getMonth() - (A.rango === '3M' ? 3 : 1));
+    desde = isoLocal(d);
+  }
+  // Ajustar a cierres disponibles
+  let iFin = -1, iIni = -1;
+  cierres.forEach((c, i) => { if (c.fecha <= hasta) iFin = i; if (c.fecha <= desde) iIni = i; });
+  if (iIni < 0) iIni = 0;
+  if (iFin <= iIni) return { ok: false, motivo: 'rango', cierres, desde, hasta };
+  const pasos = [];
+  for (let i = iIni + 1; i <= iFin; i++) {
+    const a = cierres[i - 1], b = cierres[i];
+    pasos.push(atribPaso(fundId, a, b, mepAl(a.fecha), mepAl(b.fecha)));
+  }
+  const incompleto = desde < cierres[0].fecha;
+  return { ok: true, desde: cierres[iIni].fecha, hasta: cierres[iFin].fecha, pasos: pasos.length, incompleto,
+           ...atribAcumular(fundId, pasos, A.grupo) };
+}
+
+async function abrirAtribucion(fundId) {
+  state.view = 'atrib';
+  state.fundId = fundId;
+  if (state.atrib.fundId !== fundId || !state.atrib.cierres) {
+    state.atrib.fundId = fundId;
+    state.atrib.cierres = null;
+    state.atrib.loading = true;
+    render();
+    const [cierres, fx] = await Promise.all([cargarCierres(fundId), state.atrib.fx ? state.atrib.fx : cargarFxSerie()]);
+    state.atrib.cierres = cierres;
+    state.atrib.fx = fx;
+    state.atrib.loading = false;
+  }
+  render();
+}
+function setAtrib(k, v) { state.atrib[k] = v; render(); }
+function aplicarAtribCustom() {
+  state.atrib.desde = document.getElementById('at-desde')?.value || '';
+  state.atrib.hasta = document.getElementById('at-hasta')?.value || '';
+  state.atrib.rango = 'CUSTOM';
+  render();
+}
+
+function renderAtribucion(fundId) {
+  const cfg = FUNDS_CONFIG[fundId] || {};
+  const A = state.atrib;
+  const head = `
+    ${renderTopBar({ showBack: false })}
+    <div class="fund-page">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px">
+        <div style="display:flex;align-items:center;gap:16px">
+          <button data-action="fund" class="back-btn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#A6E635" stroke-width="2.6" stroke-linecap="round"><path d="M15 18l-6-6 6-6"/></svg>
+            Volver a cartera
+          </button>
+          <div style="font-size:18px;font-weight:800">${cfg.nombre || fundId} · Atribución de performance</div>
+        </div>
+        <label for="pdf-hist-input" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)">Cargar PDFs anteriores</label>
+      </div>`;
+  if (A.loading || !A.cierres) return head + `<div class="center-msg" style="min-height:200px"><div class="spinner"></div><span>Cargando cierres…</span></div></div>`;
+
+  const cierres = cierresFondo(fundId);
+  const pill = (active, label, onclick) => `<button onclick="${onclick}"
+      style="padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;font-family:inherit;cursor:pointer;
+             background:${active ? 'rgba(166,230,53,0.15)' : 'rgba(255,255,255,0.05)'};
+             border:1px solid ${active ? 'rgba(166,230,53,0.4)' : 'rgba(255,255,255,0.08)'};
+             color:${active ? '#A6E635' : '#9A9AA0'}">${label}</button>`;
+  const res = atribCalcular(fundId);
+  const defHasta = A.hasta || (res.hasta || cierres[cierres.length - 1]?.fecha || '');
+  const defDesde = A.desde || (res.desde || cierres[0]?.fecha || '');
+  const dateInp = (id, val) => `<input id="${id}" type="date" value="${val}" class="cms-input" style="width:150px;flex:0 0 auto;padding:6px 8px;font-size:12px;font-family:'JetBrains Mono',monospace">`;
+
+  const controles = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${ATRIB_RANGOS.map(([k, l]) => pill(A.rango === k, l, `setAtrib('rango','${k}')`)).join('')}</div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:11px;color:#5A5A60;font-weight:700;text-transform:uppercase">Ver por</span>
+        ${ATRIB_GRUPOS.map(([k, l]) => pill(A.grupo === k, l, `setAtrib('grupo','${k}')`)).join('')}
+      </div>
+    </div>
+    ${A.rango === 'CUSTOM' ? `
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+      <span style="font-size:12px;color:#9A9AA0">Desde</span>${dateInp('at-desde', defDesde)}
+      <span style="font-size:12px;color:#9A9AA0">Hasta</span>${dateInp('at-hasta', defHasta)}
+      ${pill(false, 'Aplicar', 'aplicarAtribCustom()')}
+    </div>` : ''}
+    <div style="font-size:12px;color:#5A5A60;margin-bottom:16px">
+      ${cierres.length ? `${cierres.length} cierre${cierres.length > 1 ? 's' : ''} guardado${cierres.length > 1 ? 's' : ''}, del ${fDiaHist(cierres[0].fecha, true)} al ${fDiaHist(cierres[cierres.length - 1].fecha, true)}.` : 'Todavía no hay cierres guardados.'}
+      Cada PDF que cargás suma un cierre. Para ver períodos anteriores usá “Cargar PDFs anteriores”.
+    </div>`;
+
+  if (!res.ok) {
+    const msg = res.motivo === 'pocos'
+      ? 'Se necesitan al menos dos cierres para calcular la atribución de un período. Cargá los PDFs de los días anteriores, o mirá “Hoy (en vivo)”.'
+      : 'No hay dos cierres dentro del período elegido. Probá con otro rango o cargá los PDFs que faltan.';
+    return head + controles + `<div style="background:#161618;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:28px;color:#9A9AA0;font-size:13px">${msg}</div></div>`;
+  }
+
+  // ── Formatos
+  const pb  = v => (v > 0 ? '+' : v < 0 ? '−' : '') + _arN.format(Math.abs(Math.round(v * 100000) / 10)) + ' pb';
+  const pct = v => v == null ? '—' : fPct(v);
+  const col = v => v == null || Math.abs(v) < 5e-6 ? '#9A9AA0' : v > 0 ? '#2E9E2A' : '#D33A3F';
+  const tile = (label, v, sub) => `
+    <div style="min-width:150px">
+      <div class="metric-label">${label}</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800;color:${col(v)}">${fPct(v)}</div>
+      ${sub ? `<div style="font-size:11px;color:#5A5A60;margin-top:2px">${sub}</div>` : ''}
+    </div>`;
+  const periodo = res.live
+    ? `Desde el cierre del ${res.desde ? fDiaHist(res.desde, true) : '—'} hasta ahora (precios en vivo)`
+    : `${fDiaHist(res.desde, true)} → ${fDiaHist(res.hasta, true)} · ${res.pasos} ${res.pasos === 1 ? 'cierre' : 'cierres'}`;
+  const residLabel = res.live ? 'Honorarios del día' : 'Honorarios, flujos y operaciones';
+
+  // ── Barras divergentes (top 8 de cada lado + resto)
+  const pos = res.filas.filter(f => f.total > 0), neg = res.filas.filter(f => f.total < 0).reverse();
+  const top = [...pos.slice(0, 8)];
+  const restoPos = pos.slice(8).reduce((s, f) => s + f.total, 0);
+  const restoNeg = neg.slice(8).reduce((s, f) => s + f.total, 0);
+  const resto = restoPos + restoNeg;
+  const bottom = neg.slice(0, 8).reverse();
+  const barras = [...top, ...(Math.abs(resto) > 5e-7 ? [{ clave: 'Resto', total: resto, _resto: true }] : []), ...bottom];
+  const maxAbs = Math.max(...barras.map(f => Math.abs(f.total)), 1e-9);
+  const barRows = barras.map(f => {
+    const w = Math.abs(f.total) / maxAbs * 50;
+    const c = f.total >= 0 ? '#2E9E2A' : '#D33A3F';
+    return `
+      <div style="display:grid;grid-template-columns:150px 1fr 76px;align-items:center;gap:10px;margin-bottom:6px" title="${f.clave}: ${pb(f.total)}">
+        <div style="font-size:12px;color:${f._resto ? '#5A5A60' : '#C0C0C8'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${f.clave}</div>
+        <div style="position:relative;height:14px">
+          <div style="position:absolute;left:50%;top:-3px;bottom:-3px;width:1px;background:rgba(255,255,255,0.15)"></div>
+          <div style="position:absolute;top:2px;height:10px;border-radius:${f.total >= 0 ? '0 4px 4px 0' : '4px 0 0 4px'};background:${c};
+                      ${f.total >= 0 ? 'left:50%' : 'right:50%'};width:${w}%"></div>
+        </div>
+        <div style="text-align:right;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:#E5E5E7">${pb(f.total)}</div>
+      </div>`;
+  }).join('');
+
+  // ── Tabla
+  const showFx = Math.abs(res.fx) > 1e-7 || res.filas.some(f => Math.abs(f.fx) > 1e-7);
+  const filasHtml = res.filas.map(f => `
+    <tr>
+      <td>${A.grupo === 'activo' ? `<span class="ticker-chip">${f.clave}</span>` : f.clave}${f.sinDato ? `<span style="font-size:10px;color:#F59E0B;display:block;margin-top:2px">sin precio en algún cierre</span>` : ''}</td>
+      <td class="num">${f2(f.peso * 100)}%</td>
+      <td class="num" style="color:${col(f.rend == null ? null : f.corto ? -f.rend : f.rend)}">${pct(f.rend)}${f.corto ? '<span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">posición vendida</span>' : ''}</td>
+      <td class="num" style="color:${col(f.precio)}">${pb(f.precio)}</td>
+      ${showFx ? `<td class="num" style="color:${col(f.fx)}">${pb(f.fx)}</td>` : ''}
+      <td class="num" style="font-weight:700;color:${col(f.total)}">${pb(f.total)}</td>
+      <td class="num" style="color:#9A9AA0">${fPct(f.total)}</td>
+    </tr>`).join('');
+
+  return head + controles + `
+    <div style="background:#161618;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:18px 20px;margin-bottom:16px">
+      <div style="font-size:12px;color:#9A9AA0;margin-bottom:14px">${periodo}${res.incompleto ? ' · <span style="color:#F59E0B">no hay cierres guardados desde el inicio del período pedido</span>' : ''}</div>
+      <div style="display:flex;gap:28px;flex-wrap:wrap">
+        ${tile(res.live ? 'Rendimiento en vivo' : 'Rendimiento del período', res.total, res.live ? 'valor cuotaparte vivo vs. cierre' : 'según valor cuotaparte de los PDFs')}
+        ${tile('Efecto precio', res.precio, 'suma de contribuciones por precio')}
+        ${showFx ? tile('Efecto tipo de cambio', res.fx, 'variación del MEP en activos de otra moneda') : ''}
+        ${tile(residLabel, res.resid, res.live ? '' : 'diferencia vs. el rendimiento oficial')}
+      </div>
+    </div>
+    <div style="background:#161618;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px;margin-bottom:16px">
+      <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:12px">Contribución al rendimiento · puntos básicos</div>
+      ${barRows || '<div style="color:#5A5A60;font-size:13px">Sin movimientos en el período.</div>'}
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>${ATRIB_GRUPOS.find(g => g[0] === A.grupo)[1]}</th><th class="num">Peso prom.</th><th class="num">Rend. del activo</th>
+          <th class="num">Precio</th>${showFx ? '<th class="num">Tipo de cambio</th>' : ''}<th class="num">Contribución</th><th class="num">%</th>
+        </tr></thead>
+        <tbody>${filasHtml}
+          <tr><td colspan="${showFx ? 5 : 4}" class="denom-cell">${residLabel}</td>
+              <td class="num" style="font-weight:700;color:${col(res.resid)}">${pb(res.resid)}</td><td class="num" style="color:#9A9AA0">${fPct(res.resid)}</td></tr>
+        </tbody>
+        <tfoot><tr style="border-top:1px solid rgba(255,255,255,0.12);font-weight:800">
+          <td colspan="${showFx ? 5 : 4}">Total</td>
+          <td class="num" style="color:${col(res.total)}">${pb(res.total)}</td><td class="num" style="color:${col(res.total)}">${fPct(res.total)}</td>
+        </tr></tfoot>
+      </table>
+    </div>
+  </div>`;
+}
+
+// ── Carga masiva de PDFs anteriores (solo guarda cierres + historial de VCP;
+//    NO toca la cartera actual) ─────────────────────────────────────────
+async function cargarPDFsHistoricos(files) {
+  const fundId = state.fundId;
+  const lista = [...(files || [])];
+  document.getElementById('pdf-hist-input').value = '';
+  if (!lista.length || !fundId) return;
+  const actuales = new Set((state.holdings[fundId] || []).map(h => h.ticker));
+  const resultados = [];
+  for (let i = 0; i < lista.length; i++) {
+    const f = lista[i];
+    showModal(`<div class="modal-box" style="max-width:380px;padding:36px;text-align:center">
+      <div class="spinner" style="margin:0 auto 16px"></div>
+      <div style="color:#9A9AA0;font-size:14px;font-weight:600">Procesando ${i + 1} de ${lista.length}</div>
+      <div style="color:#5A5A60;font-size:12px;margin-top:6px">${f.name}</div>
+    </div>`);
+    try {
+      const data = await parsePDF(await f.arrayBuffer());
+      if (!data.holdings.length) throw new Error('sin inversiones');
+      const fecha = await guardarCierre(fundId, data);
+      let vcpOk = false;
+      const vh = prepararVcpHistorial(fundId, data);
+      if (vh.escalaOk && vh.vcp > 0 && vh.fecha) {
+        // Si ya hay un valor para esa fecha (ej. del Excel) no se pisa
+        const r = await fetch(`${SB_URL}/vcp_historial?on_conflict=fund_id,fecha,clase`, {
+          method: 'POST',
+          headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'resolution=ignore-duplicates,return=minimal' },
+          body: JSON.stringify({ fund_id: fundId, fecha: vh.fecha, clase: 'A', vcp: vh.vcp, fuente: 'pdf' }),
+        });
+        vcpOk = r.ok;
+      }
+      const coincid = actuales.size ? data.holdings.filter(h => actuales.has(h.ticker)).length / data.holdings.length : 1;
+      resultados.push({ archivo: f.name, fecha, n: data.holdings.length, ok: true, vcpOk, aviso: coincid < 0.3 ? '¿Es de este fondo? Casi no coincide con la cartera actual' : '' });
+    } catch (e) {
+      resultados.push({ archivo: f.name, ok: false, error: e.message });
+    }
+  }
+  state.historial = await cargarHistorial();
+  resultados.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''));
+  const dup = new Set(resultados.filter((r, i, arr) => r.fecha && arr.findIndex(x => x.fecha === r.fecha) !== i).map(r => r.fecha));
+  const filas = resultados.map(r => `
+    <tr>
+      <td style="padding:6px 10px;font-size:12px;color:#9A9AA0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.archivo}</td>
+      <td style="padding:6px 10px;font-family:'JetBrains Mono',monospace;font-size:12px">${r.fecha ? fDiaHist(r.fecha, true) : '—'}</td>
+      <td style="padding:6px 10px;text-align:right;font-size:12px">${r.n ?? '—'}</td>
+      <td style="padding:6px 10px;font-size:12px;color:${r.ok && !r.aviso && !dup.has(r.fecha) ? '#2E9E2A' : '#F59E0B'}">
+        ${!r.ok ? 'Error: ' + r.error : dup.has(r.fecha) ? 'Fecha repetida: quedó el último' : r.aviso || 'OK'}</td>
+    </tr>`).join('');
+  showModal(`
+    <div class="modal-box" style="max-width:620px">
+      <div class="modal-header"><div style="font-size:16px;font-weight:800">PDFs anteriores cargados</div>
+        <button onclick="closeModal();render()" style="background:none;border:none;color:#9A9AA0;cursor:pointer;font-size:18px">✕</button></div>
+      <div class="modal-body">
+        <p style="color:#9A9AA0;font-size:13px;margin-bottom:12px">${resultados.filter(r => r.ok).length} de ${resultados.length} guardados como cierres. La cartera actual no se modificó.</p>
+        <div style="max-height:340px;overflow-y:auto;border:1px solid rgba(255,255,255,0.08);border-radius:8px">
+          <table style="width:100%;border-collapse:collapse"><thead><tr>
+            <th style="padding:8px 10px;text-align:left;font-size:10px;color:#5A5A60">ARCHIVO</th>
+            <th style="padding:8px 10px;text-align:left;font-size:10px;color:#5A5A60">FECHA</th>
+            <th style="padding:8px 10px;text-align:right;font-size:10px;color:#5A5A60">ACTIVOS</th>
+            <th style="padding:8px 10px;text-align:left;font-size:10px;color:#5A5A60">ESTADO</th>
+          </tr></thead><tbody>${filas}</tbody></table>
+        </div>
+      </div>
+      <div class="modal-footer"><button class="btn-primary" onclick="closeModal();render()">Listo</button></div>
+    </div>`);
+}
+
 // ── FONDO DETALLE ────────────────────────────────────────────────────
 function renderFondo(fundId) {
   const cfg = FUNDS_CONFIG[fundId];
@@ -2136,6 +2568,10 @@ function renderFondo(fundId) {
         </div>
         <!-- Right side buttons -->
         <div style="display:flex;gap:10px;align-items:center">
+        <button data-action="atrib" data-id="${fundId}" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>
+          Atribución
+        </button>
         <button data-action="activos" data-id="${fundId}" class="upload-btn" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="15" x2="12" y2="15"/></svg>
           Activos
@@ -2267,6 +2703,8 @@ function bindEvents() {
         state.view   = 'activos';
         state.fundId = el.dataset.id || state.fundId;
         render();
+      } else if (action === 'atrib') {
+        abrirAtribucion(el.dataset.id || state.fundId);
       } else if (action === 'fund') {
         state.view = 'fund';
         render();
@@ -3362,6 +3800,10 @@ async function confirmarCargaPDF() {
         pdfDate:     data.fecha       ?? FUNDS_CONFIG[fundId].pdfDate,
       });
     }
+
+    // 3a. Guardar la foto de la cartera del cierre (para la atribución)
+    try { await guardarCierre(fundId, data); }
+    catch (e) { console.warn('[iEB] No se pudo guardar el cierre:', e.message); }
 
     // 3b. Guardar VCP del cierre en el historial (si falla, no frena la carga)
     try {
