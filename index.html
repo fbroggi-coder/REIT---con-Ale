@@ -420,6 +420,7 @@
     transition: background 0.12s;
   }
   .export-opt:hover { background: rgba(255,255,255,0.08); }
+  .op-cerrada td:not(:first-child) { opacity: 0.45; }
 </style>
 </head>
 <body>
@@ -1050,6 +1051,7 @@ const state = {
   opciones:        {},    // { [fundId]: [filas de la tabla `opciones`] }
   optPx:           {},    // { [symbol]: { px, src: 'live'|'yahoo' } } — USD cable, sin canje
   optVerCerradas:  false,
+  optAbierto:      false, // panel de opciones desplegado
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1631,6 +1633,7 @@ function renderOpciones(fundId) {
 
   const chip = (txt, c) => `<span style="display:inline-block;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;white-space:nowrap">${txt}</span>`;
   const th = (t, num) => `<th${num ? ' class="num"' : ''}>${t}</th>`;
+  const actBtn = col => `background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:${col};padding:3px 7px;border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit;margin-right:2px`;
 
   const rows = lista.map(o => {
     const c = calcOpcion(o);
@@ -1644,8 +1647,15 @@ function renderOpciones(fundId) {
       : c.src === 'live' ? ' <span class="badge badge-live">LIVE</span>' : ' <span class="badge badge-hold">YAHOO</span>';
     const pxEdit = `<button onclick="abrirPrecioManual('${fundId}', ${o.id})" title="Modificar precio a mano" style="background:none;border:none;color:#5A5A60;cursor:pointer;font-size:12px;padding:0 0 0 4px">✎</button>`;
     return `
-      <tr style="${cerrada ? 'opacity:0.45' : ''}">
-        <td>${chip(c.isPut ? 'PUT' : 'CALL', c.isPut ? '#38BDF8' : '#A78BFA')}</td>
+      <tr class="${cerrada ? 'op-cerrada' : ''}">
+        <td style="white-space:nowrap">
+          <button onclick="abrirOpcion('${fundId}', ${o.id})" title="Editar" style="${actBtn('#C0C0C8')}">✎</button>
+          ${cerrada
+            ? `<button onclick="cambiarEstadoOpcion('${fundId}', ${o.id}, 'ABIERTA')" title="Reabrir posición" style="${actBtn('#A6E635')}">↺</button>`
+            : `<button onclick="cambiarEstadoOpcion('${fundId}', ${o.id}, 'CERRADA')" title="Cerrar posición (ejercida / vencida)" style="${actBtn('#38BDF8')}">✓</button>`}
+          <button onclick="confirmarEliminarOpcion('${fundId}', ${o.id})" title="Eliminar" style="${actBtn('#F87171')}">✕</button>
+        </td>
+        <td>${chip(c.isPut ? 'PUT' : 'CALL', c.isPut ? '#38BDF8' : '#A78BFA')}${cerrada ? ' ' + chip('Cerrada', '#9A9AA0') : ''}</td>
         <td><span class="ticker-chip">${o.papel}</span>${o.notas ? `<span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">${o.notas}</span>` : ''}</td>
         <td class="num">${fNum(c.E)}</td>
         <td class="num">${f2(c.p)}</td>
@@ -1661,25 +1671,29 @@ function renderOpciones(fundId) {
         <td class="num">${o.vencimiento ? fDiaHist(o.vencimiento) : '—'}<span style="font-size:10px;color:#5A5A60;display:block;margin-top:2px">${c.dias != null ? c.dias + ' días' : ''}</span></td>
         <td class="num">${usd(c.cash)}</td>
         <td style="text-align:center">${c.itm == null ? '—' : c.itm ? chip('SÍ', '#F59E0B') : '<span style="color:#5A5A60;font-size:11px">No</span>'} ${alertas.join(' ')}</td>
-        <td style="white-space:nowrap">
-          <button onclick="abrirOpcion('${fundId}', ${o.id})" title="Editar" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#C0C0C8;padding:3px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit">✎</button>
-          <button onclick="confirmarEliminarOpcion('${fundId}', ${o.id})" title="Eliminar" style="background:rgba(211,58,63,0.1);border:1px solid rgba(211,58,63,0.3);color:#F87171;padding:3px 8px;border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit">✕</button>
-        </td>
       </tr>`;
   }).join('');
 
   const totalCash = sum(x => x.c.cash);
-  const btn = (label, onclick, primary) => `<button onclick="${onclick}" class="upload-btn" style="${primary ? 'background:rgba(166,230,53,0.1);border:1px solid rgba(166,230,53,0.3);color:#A6E635' : 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)'}">${label}</button>`;
+  const abierto    = state.optAbierto;
+  const nEjercibles = abiertas.filter(x => x.c.itm).length;
+  const nVencidas   = abiertas.filter(x => x.c.dias != null && x.c.dias < 0).length;
+  const btn = (label, onclick, primary) => `<button onclick="event.stopPropagation();${onclick}" class="upload-btn" style="${primary ? 'background:rgba(166,230,53,0.1);border:1px solid rgba(166,230,53,0.3);color:#A6E635' : 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)'}">${label}</button>`;
 
   return `
     <div style="background:#161618;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:16px 20px;margin-bottom:16px">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px">
-        <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px">Opciones · Puts y Covered Calls <span style="text-transform:none;letter-spacing:0;font-weight:600;color:#5A5A60">· precios USD cable, sin ajuste a MEP</span></div>
+      <div onclick="toggleOptPanel()" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;user-select:none;${abierto ? 'margin-bottom:14px' : ''}">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#9A9AA0" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="transition:transform 0.15s;transform:rotate(${abierto ? 90 : 0}deg)"><polyline points="9 6 15 12 9 18"/></svg>
+          <div style="font-size:10px;font-weight:700;color:#5A5A60;text-transform:uppercase;letter-spacing:0.6px">Opciones · Puts y Covered Calls <span style="text-transform:none;letter-spacing:0;font-weight:600;color:#5A5A60">· precios USD cable, sin ajuste a MEP</span></div>
+          ${!abierto && abiertas.length ? `<span style="font-size:12px;color:#9A9AA0">${abiertas.length} abiertas · resultado <strong style="font-family:'JetBrains Mono',monospace;color:${colorN(resultado)}">${usd(resultado)}</strong>${nEjercibles ? ' · ' + chip(nEjercibles + ' ejercible' + (nEjercibles > 1 ? 's' : ''), '#F59E0B') : ''}${nVencidas ? ' ' + chip(nVencidas + ' vencida' + (nVencidas > 1 ? 's' : ''), '#D33A3F') : ''}</span>` : ''}
+        </div>
         <div style="display:flex;gap:8px">
-          ${btn(state.optVerCerradas ? 'Ocultar cerradas' : 'Ver cerradas', 'toggleOptCerradas()')}
+          ${abierto ? btn(state.optVerCerradas ? 'Ocultar cerradas' : 'Ver cerradas', 'toggleOptCerradas()') : ''}
           ${btn('+ Nueva opción', `abrirOpcion('${fundId}')`, true)}
         </div>
       </div>
+      ${!abierto ? '' : `
       ${abiertas.length ? `
       <div style="display:flex;gap:22px;flex-wrap:wrap;margin-bottom:14px">
         ${tile('Primas cobradas', usd(primas))}
@@ -1692,19 +1706,35 @@ function renderOpciones(fundId) {
       <div class="table-wrap">
         <table>
           <thead><tr>
-            ${th('Tipo')}${th('Papel')}${th('Cantidad', 1)}${th('Prima', 1)}${th('Px compra', 1)}${th('Strike', 1)}${th('Mercado', 1)}${th('Dist. strike', 1)}${th('Px a tomar', 1)}${th('Resultado', 1)}${th('Cobertura', 1)}${th('TNA', 1)}${th('TEA', 1)}${th('Vencimiento', 1)}${th('Cash', 1)}${th('Ejercible')}${th('')}
+            ${th('')}${th('Tipo')}${th('Papel')}${th('Cantidad', 1)}${th('Prima', 1)}${th('Px compra', 1)}${th('Strike', 1)}${th('Mercado', 1)}${th('Dist. strike', 1)}${th('Px a tomar', 1)}${th('Resultado', 1)}${th('Cobertura', 1)}${th('TNA', 1)}${th('TEA', 1)}${th('Vencimiento', 1)}${th('Cash', 1)}${th('Ejercible')}
           </tr></thead>
           <tbody>${rows}</tbody>
           <tfoot><tr style="border-top:1px solid rgba(255,255,255,0.12);font-weight:700">
-            <td colspan="9" class="denom-cell">Total abiertas</td>
+            <td colspan="10" class="denom-cell">Total abiertas</td>
             <td class="num" style="color:${colorN(resultado)}">${usd(resultado)}</td>
             <td colspan="4"></td>
             <td class="num">${usd(totalCash)}</td>
-            <td colspan="2"></td>
+            <td></td>
           </tr></tfoot>
         </table>
-      </div>` : `<div style="color:#5A5A60;font-size:13px">No hay opciones cargadas. Usá “+ Nueva opción”.</div>`}
+      </div>` : `<div style="color:#5A5A60;font-size:13px">No hay opciones ${todas.length ? 'abiertas' : 'cargadas'}. Usá “+ Nueva opción”${todas.length ? ' o “Ver cerradas”' : ''}.</div>`}`}
     </div>`;
+}
+
+function toggleOptPanel() { state.optAbierto = !state.optAbierto; render(); }
+
+async function cambiarEstadoOpcion(fundId, id, estado) {
+  try {
+    const r = await fetch(`${SB_URL}/opciones?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: { ...SB_HDR, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ estado }),
+    });
+    if (!r.ok) throw new Error('Supabase ' + r.status);
+    const o = (state.opciones[fundId] || []).find(x => x.id === id);
+    if (o) o.estado = estado;
+  } catch (e) { console.warn('[iEB] cambiarEstadoOpcion:', e.message); }
+  render();
 }
 
 function abrirPrecioManual(fundId, id) {
