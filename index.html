@@ -3118,27 +3118,73 @@ function impTicker(fundId, raw) {
   return { ticker: t, enCartera: false };
 }
 
-// Detecta una fila de encabezado y mapea columnas por nombre
-const IMP_COLS = {
-  tk:     /^(ticker|especie|bono|activo|papel|s[ií]mbolo|instrumento|c[oó]digo)$/,
-  fecha:  /^(fecha( de pago)?|fecha pago|pago|date|fecha de cobro|vto\.? cup[oó]n)$/,
-  total:  /^(total|flujo|flujo total|monto|importe|pago total|cash ?flow|renta \+ amort.*|total a cobrar)$/,
-  renta:  /^(renta|inter[eé]s(es)?|cup[oó]n|coupon|renta \(.*\))$/,
-  amort:  /^(amort\.?|amortizaci[oó]n|capital|amortizaci[oó]n \(.*\))$/,
-  moneda: /^(moneda|currency|mon\.?)$/,
-  cupPct: /^(cup[oó]n ?%|cup[oó]n % anual|tasa|tasa %|rate|tna)$/,
-  freq:   /^(frecuencia|pagos por a[nñ]o.*|freq\.?|pagos\/a[nñ]o)$/,
-  vto:    /^(vencimiento|vto\.?|maturity|fecha de vencimiento)$/,
-};
+// Encabezados (de una o dos filas, con celdas combinadas) → columnas por contenido
+const _norm = s => String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 function impHeader(filas) {
-  for (let i = 0; i < Math.min(filas.length, 12); i++) {
+  const ffill = row => { let last = ''; return (row || []).map(c => { const s = _norm(c); if (s) last = s; return last; }); };
+  const W = Math.max(0, ...filas.slice(0, 14).map(r => (r || []).length));
+  let mejor = null;
+  for (let i = 0; i < Math.min(filas.length - 1, 14); i++) {
+    const sub = (filas[i] || []).map(_norm);
+    if (sub.filter(Boolean).length < 2) continue;
+    const grp = i > 0 ? ffill(filas[i - 1]) : [];
+    const lab = Array.from({ length: W }, (_, j) => ((grp[j] && grp[j] !== sub[j] ? grp[j] + ' ' : '') + (sub[j] || '')).trim());
+    const next = filas[i + 1] || [];
+    const cols = (re, no) => lab.map((l, j) => j).filter(j => re.test(lab[j]) && !(no && no.test(lab[j])));
     const map = {};
-    (filas[i] || []).forEach((c, j) => {
-      const s = String(c ?? '').trim().toLowerCase().replace(/\s*\(.*?\)\s*$/, '').replace(/\s+/g, ' ');
-      for (const [k, re] of Object.entries(IMP_COLS)) if (map[k] == null && re.test(s)) { map[k] = j; break; }
+    // Fecha: la que tenga una fecha en la fila siguiente; preferir "efectiva"
+    const fechas = cols(/fecha|date|^pago$/).filter(j => impFecha(next[j]));
+    if (!fechas.length) continue;
+    map.fecha = fechas.find(j => /efectiv/.test(lab[j])) ?? fechas[0];
+    const pick = (re, no) => { const c = cols(re, no).filter(j => j !== map.fecha); return c; };
+    const tot = pick(/total|^flujo$|flujo total|^monto|importe|cash ?flow/, /tasa|%/);
+    const ren = pick(/inter[eé]s|renta|coupon|cup[oó]n/, /tasa|%|#|n[uú]mero|nro/);
+    const amo = pick(/amort|capital/, /residual|tasa|%/);
+    // Escala por encabezado: c/100 o (vn)
+    const esc = j => /c\/ ?100|por 100|cada 100|x ?100|\b100 ?vn/.test(lab[j]) ? '100' : /\(vn\)|por vn|c\/ ?1\b|valor nominal 1|por 1 de nominal/.test(lab[j]) ? '1' : null;
+    if (tot.length) { map.total = tot.find(j => esc(j) === '1') ?? tot[0]; }
+    else {
+      // renta + amortización del mismo grupo (preferir por 1 de nominal)
+      const pref = ren.find(j => esc(j) === '1') ?? ren[0];
+      if (pref != null) map.renta = pref;
+      const am = amo.filter(j => esc(j) === esc(map.renta ?? -1));
+      if (am.length || amo.length) map.amort = (am.length ? am : amo)[0];
+    }
+    // Descartar columnas que son un contador (1, 2, 3…)
+    for (const k of ['total', 'renta']) {
+      if (map[k] == null) continue;
+      const v = filas.slice(i + 1, i + 6).map(r => impNum((r || [])[map[k]])).filter(n => n != null);
+      if (v.length >= 3 && v.every((n, x) => Number.isInteger(n) && n === v[0] + x)) delete map[k];
+    }
+    if (map.total == null && map.renta == null && map.amort == null) continue;
+    const tk = cols(/^(ticker|especie|bono|activo|papel|s[ií]mbolo|instrumento|c[oó]digo)$/); if (tk.length) map.tk = tk[0];
+    const mon = cols(/moneda|currency/); if (mon.length) map.moneda = mon[0];
+    map.escala = esc(map.total ?? map.renta ?? map.amort);
+    if (!mejor) mejor = { fila: i, map };
+  }
+  if (mejor) return mejor;
+  // Formato "cupón fijo" con encabezado: especie | cupón % | pagos por año [| vto]
+  for (let i = 0; i < Math.min(filas.length, 12); i++) {
+    const lab = (filas[i] || []).map(_norm), map = {};
+    lab.forEach((s, j) => {
+      if (map.tk == null && /^(ticker|especie|bono|activo|papel)$/.test(s)) map.tk = j;
+      else if (map.cupPct == null && /cup[oó]n ?%|tasa|rate|tna/.test(s)) map.cupPct = j;
+      else if (map.freq == null && /frecuencia|pagos por a|freq/.test(s)) map.freq = j;
+      else if (map.vto == null && /vencimiento|maturity|^vto/.test(s)) map.vto = j;
+      else if (map.moneda == null && /moneda|currency/.test(s)) map.moneda = j;
     });
-    const n = Object.keys(map).length;
-    if (n >= 2 && (map.fecha != null || map.cupPct != null)) return { fila: i, map };
+    if (map.cupPct != null && map.freq != null) return { fila: i, map };
+  }
+  return null;
+}
+// "Especie | GYC4D" (o "Especie: GYC4D") en las primeras filas
+function impEspecieEtiqueta(filas) {
+  for (const r of filas.slice(0, 12)) {
+    const c = (r || []).map(x => String(x ?? '').trim()).filter(Boolean);
+    if (!c.length) continue;
+    const m = c[0].match(/^(especie|ticker|bono|instrumento|activo|s[ií]mbolo)\s*:?\s*(\S*)$/i);
+    if (m && m[2] && impPareceTicker(m[2])) return m[2];
+    if (m && !m[2] && c[1] && impPareceTicker(c[1])) return c[1];
   }
   return null;
 }
@@ -3146,7 +3192,7 @@ function impHeader(filas) {
 // bloques: [{ nombre, filas }]  (una hoja de Excel o el texto pegado)
 // opts: { tickerDefault, por100: 'auto' | '1' | '100' }
 function impParsear(fundId, bloques, opts = {}) {
-  const flujos = {}, bullets = {}, monedas = {}, origen = {}, ignoradas = [];
+  const flujos = {}, bullets = {}, monedas = {}, origen = {}, escalas = {}, ignoradas = [];
   const def = opts.tickerDefault ? impTicker(fundId, opts.tickerDefault) : null;
   const addFlujo = (tk, fecha, monto, src) => {
     (flujos[tk.ticker] = flujos[tk.ticker] || { tk, l: [] }).l.push({ fecha, monto });
@@ -3156,10 +3202,12 @@ function impParsear(fundId, bloques, opts = {}) {
   for (const { nombre, filas } of bloques) {
     const hoja = nombre && impPareceTicker(nombre) ? impTicker(fundId, nombre) : null;
     const hojaOk = hoja?.enCartera ? hoja : null;
-    let ultimo = null;   // especie "arrastrada" de filas anteriores
+    const etiq = impEspecieEtiqueta(filas);
+    let ultimo = etiq ? impTicker(fundId, etiq) : null;   // especie "arrastrada" de filas anteriores
+    const srcEtiq = etiq ? 'fila “Especie” del archivo' : null;
     const tkDe = (cell) => {
       if (impPareceTicker(cell)) { ultimo = impTicker(fundId, cell); return [ultimo, 'archivo']; }
-      if (ultimo) return [ultimo, 'arrastrada'];
+      if (ultimo) return [ultimo, srcEtiq && ultimo.ticker === impTicker(fundId, etiq).ticker ? srcEtiq : 'arrastrada'];
       if (hojaOk) return [hojaOk, 'nombre de la hoja'];
       if (def) return [def, 'elegida'];
       return [null, null];
@@ -3180,6 +3228,7 @@ function impParsear(fundId, bloques, opts = {}) {
         if (M.tk != null && impPareceTicker(get('tk'))) { tk = ultimo = impTicker(fundId, get('tk')); src = 'archivo'; }
         else [tk, src] = tkDe(null);
         if (/^total/i.test(String(raw[0] ?? '')) || /^total/i.test(String(get('tk') ?? ''))) return;   // fila de totales
+        if (!impFecha(get('fecha')) && M.cupPct == null && !impPareceTicker(raw.find(x => x !== '' && x != null))) return;   // sub-encabezados / notas
         const mon = impMoneda(get('moneda'));
         const fecha = impFecha(get('fecha'));
         if (fecha) {
@@ -3188,6 +3237,7 @@ function impParsear(fundId, bloques, opts = {}) {
           if (monto == null || monto <= 0) return;                                     // filas sin pago
           if (!tk) { ignoradas.push({ fila, txt, motivo: 'no se sabe la especie' }); return; }
           addFlujo(tk, fecha, monto, src);
+          if (M.escala) escalas[tk.ticker] = M.escala;
           if (mon) monedas[tk.ticker] = mon;
           return;
         }
@@ -3246,7 +3296,8 @@ function impParsear(fundId, bloques, opts = {}) {
     }
     // ¿Montos por 100 de nominal? Un bono por 1 de nominal paga en total ~1 a 3; por 100, ~100 a 300
     const suma = dedup.reduce((s, x) => s + x.monto, 0);
-    const por100 = opts.por100 === '100' || (opts.por100 !== '1' && (dedup.length === 1 ? dedup[0].monto > 20 : suma > 20));
+    const modo = opts.por100 && opts.por100 !== 'auto' ? opts.por100 : (escalas[t] || 'auto');   // elegido > encabezado > detección
+    const por100 = modo === '100' || (modo !== '1' && (dedup.length === 1 ? dedup[0].monto > 20 : suma > 20));
     if (por100) dedup.forEach(x => { x.monto /= 100; });
     const row = { fund_id: fundId, ticker: t, metodo: dedup.length === 1 ? 'cero' : 'flujos', moneda_flujos: monedaDe(t),
       vencimiento: null, cupon: null, frecuencia: null, valor_final: null, flujos: null, tir_manual: null, md_manual: null };
