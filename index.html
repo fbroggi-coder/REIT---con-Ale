@@ -1467,6 +1467,28 @@ function inicioRango(lastIso, r) {
   return isoLocal(new Date(d.getFullYear(), d.getMonth() - meses, d.getDate()));
 }
 
+// Provisorio de hoy: último valor oficial × (1 + rendimiento estimado del día).
+// Es el mismo rendimiento que muestra la cartera (PN en vivo vs. PN a precios del PDF).
+// Solo días hábiles, cuando hoy es posterior al último PDF y ese cierre está en el historial.
+function diasHabilesEntre(a, b) {   // días hábiles (lun–vie) en (a, b]
+  let n = 0; const d = new Date(a + 'T12:00:00'), fin = new Date(b + 'T12:00:00');
+  while (d < fin) { d.setDate(d.getDate() + 1); if (d.getDay() % 6) n++; }
+  return n;
+}
+function histProvisorio(fundId, serie) {
+  const cfg  = FUNDS_CONFIG[fundId] || {};
+  const fPdf = fechaPDFaISO(cfg.pdfDate);
+  const hoy  = fechaArgISO();
+  const dow  = new Date(hoy + 'T12:00:00').getDay();
+  if (!fPdf || hoy <= fPdf || dow === 0 || dow === 6) return null;
+  const last = serie[serie.length - 1];
+  if (!last || last.fecha !== fPdf) return null;
+  const { rend } = calcNAV(fundId);
+  if (!isFinite(rend)) return null;
+  return { fecha: hoy, vcp: last.vcp * (1 + rend), rend, conPrecios: !!state.lastPriceUpdate,
+           hora: state.lastPriceUpdate ? state.lastPriceUpdate.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : null };
+}
+
 function renderHistorial(fundId) {
   const serie = state.historial[fundId] || [];
   if (serie.length < 2) return '';
@@ -1505,18 +1527,20 @@ function renderHistorial(fundId) {
       bench.push(bench[i - 1] * (1 + tasaAl(pts[i - 1].fecha) / 100 * diasEntre(pts[i - 1].fecha, pts[i].fecha) / 365));
   }
   const rendBench = bench ? bench[bench.length - 1] / bench[0] - 1 : null;
+  const prov = histProvisorio(fundId, serie);
+  const ptsAll = prov ? [...pts, { fecha: prov.fecha, vcp: prov.vcp, prov: true }] : pts;
 
   // ── Geometría
-  const _maxLbl = f4(Math.max(...pts.map(p => p.vcp)) * escala * 1.05).length;
+  const _maxLbl = f4(Math.max(...ptsAll.map(p => p.vcp)) * escala * 1.05).length;
   const W = 1000, H = 240, ml = Math.max(64, _maxLbl * 7.4 + 14), mr = 16, mt = 12, mb = 28;
   const iw = W - ml - mr, ih = H - mt - mb;
-  const vals = pts.map(p => p.vcp).concat(bench || []);
+  const vals = ptsAll.map(p => p.vcp).concat(bench || []);
   let lo = Math.min(...vals), hi = Math.max(...vals);
   const pad = (hi - lo) * 0.08 || hi * 0.005;
   lo -= pad; hi += pad;
-  const X = i => ml + (pts.length === 1 ? 0 : i / (pts.length - 1) * iw);
+  const X = i => ml + (ptsAll.length === 1 ? 0 : i / (ptsAll.length - 1) * iw);
   const Y = v => mt + (1 - (v - lo) / (hi - lo)) * ih;
-  _histChart = { fundId, pts, X, Y, W, H, ml, mr, mt, mb, escala, bench };
+  _histChart = { fundId, pts: ptsAll, X, Y, W, H, ml, mr, mt, mb, escala, bench, prov };
   const pathBench = bench ? bench.map((v, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1)).join(' ') : '';
 
   const path = pts.map((p, i) => (i ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(p.vcp).toFixed(1)).join(' ');
@@ -1526,11 +1550,21 @@ function renderHistorial(fundId) {
   const grid = yTicks.map(v => `
     <line x1="${ml}" x2="${W - mr}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
     <text x="${ml - 8}" y="${(Y(v) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#5A5A60" font-family="JetBrains Mono, monospace">${f4(v * escala)}</text>`).join('');
-  const nX = Math.min(6, pts.length);
-  const xIdx = [...new Set(Array.from({ length: nX }, (_, k) => Math.round(k * (pts.length - 1) / (nX - 1 || 1))))];
+  const nX = Math.min(6, ptsAll.length);
+  const xIdx = [...new Set(Array.from({ length: nX }, (_, k) => Math.round(k * (ptsAll.length - 1) / (nX - 1 || 1))))];
   const xLabels = xIdx.map(i => `
-    <text x="${X(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === pts.length - 1 ? 'end' : 'middle'}" font-size="11" fill="#5A5A60">${fDiaHist(pts[i].fecha)}</text>`).join('');
+    <text x="${X(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === ptsAll.length - 1 ? 'end' : 'middle'}" font-size="11" fill="${ptsAll[i].prov ? '#9A9AA0' : '#5A5A60'}">${ptsAll[i].prov ? 'hoy' : fDiaHist(ptsAll[i].fecha)}</text>`).join('');
   const lastI = pts.length - 1;
+  // Tramo provisorio: punteado desde el último cierre oficial hasta hoy, con punto hueco y etiqueta
+  const provSvg = prov ? (() => {
+    const x0 = X(lastI), y0 = Y(pts[lastI].vcp), x1 = X(lastI + 1), y1 = Y(prov.vcp);
+    const cProv = prov.rend >= 5e-5 ? '#2E9E2A' : prov.rend <= -5e-5 ? '#D33A3F' : '#9A9AA0';
+    const ly = y1 < mt + 26 ? y1 + 22 : y1 - 12;
+    return `
+      <line x1="${x0.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${x1.toFixed(1)}" y2="${y1.toFixed(1)}" stroke="${color}" stroke-width="2" stroke-dasharray="4 4" stroke-linecap="round"/>
+      <circle cx="${x1.toFixed(1)}" cy="${y1.toFixed(1)}" r="5" fill="#161618" stroke="${color}" stroke-width="2"/>
+      <text x="${(x1 - 9).toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="end" font-size="11" font-weight="700" fill="${cProv}" font-family="JetBrains Mono, monospace">${fPct(prov.rend)}</text>`;
+  })() : '';
 
   const rangeBtns = HIST_RANGES.map(([k, label]) => {
     const active = state.histRange === k;
@@ -1550,6 +1584,14 @@ function renderHistorial(fundId) {
             <span style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:800">${f4(R.last.vcp * escala)}</span>
             <span style="font-size:12px;color:#9A9AA0">cierre ${fDiaHist(R.last.fecha, true)}</span>
           </div>
+          ${prov ? `
+          <div style="display:flex;align-items:baseline;gap:8px;margin-top:4px;flex-wrap:wrap">
+            <svg width="16" height="10" style="align-self:center"><line x1="0" y1="5" x2="10" y2="5" stroke="${color}" stroke-width="2" stroke-dasharray="3 3"/><circle cx="12" cy="5" r="3" fill="#161618" stroke="${color}" stroke-width="1.5"/></svg>
+            <span style="font-size:12px;color:#9A9AA0">Hoy estimado</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700">${f4(prov.vcp * escala)}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:${prov.rend >= 5e-5 ? '#2E9E2A' : prov.rend <= -5e-5 ? '#D33A3F' : '#9A9AA0'}">${fPct(prov.rend)}</span>
+            <span style="font-size:11px;color:#5A5A60">vs. cierre ${fDiaHist(R.last.fecha)}${diasHabilesEntre(R.last.fecha, prov.fecha) > 1 ? ' <span style="color:#F59E0B">(falta cargar PDFs: incluye ' + diasHabilesEntre(R.last.fecha, prov.fecha) + ' días)</span>' : ''} · ${prov.conPrecios ? 'precios en vivo ' + prov.hora : 'sin precios en vivo todavía: solo honorarios'}</span>
+          </div>` : ''}
         </div>
         <div style="display:flex;gap:18px;flex-wrap:wrap">
           ${tile('Día', R.dia)}${tile('Mes', R.mtd)}${tile('Año', R.ytd)}${tile('12 meses', R.a12)}${tile('Desde inicio', R.ini)}
@@ -1574,12 +1616,13 @@ function renderHistorial(fundId) {
       </div>
       <div id="hist-wrap" style="position:relative">
         <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img"
-             aria-label="Evolución del valor de cuotaparte Clase A, ${fDiaHist(pts[0].fecha, true)} a ${fDiaHist(pts[lastI].fecha, true)}">
+             aria-label="Evolución del valor de cuotaparte Clase A, ${fDiaHist(pts[0].fecha, true)} a ${fDiaHist(pts[lastI].fecha, true)}${prov ? ', con estimado de hoy ' + fPct(prov.rend) : ''}">
           ${grid}
           <path d="${area}" fill="${color}" opacity="0.07"/>
           ${bench ? `<path d="${pathBench}" fill="none" stroke="#60A5FA" stroke-width="2" stroke-dasharray="6 4" stroke-linejoin="round" stroke-linecap="round"/>` : ''}
           <path d="${path}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
           <circle cx="${X(lastI).toFixed(1)}" cy="${Y(pts[lastI].vcp).toFixed(1)}" r="4" fill="${color}" stroke="#161618" stroke-width="2"/>
+          ${provSvg}
           ${xLabels}
           <g id="hist-hover" style="display:none;pointer-events:none">
             <line id="hist-cross" y1="${mt}" y2="${mt + ih}" stroke="rgba(255,255,255,0.25)" stroke-width="1"/>
@@ -1609,11 +1652,11 @@ function histHover(ev) {
   const vd   = prev ? p.vcp / prev.vcp - 1 : null;
   const vr   = p.vcp / c.pts[0].vcp - 1;
   const tip  = document.getElementById('hist-tip');
-  tip.innerHTML = `<div style="color:#9A9AA0;margin-bottom:3px">${fDiaHist(p.fecha, true)}</div>
+  tip.innerHTML = `<div style="color:#9A9AA0;margin-bottom:3px">${p.prov ? 'Hoy · <strong style="color:#E5E5E7">estimado</strong>' + (c.prov?.conPrecios ? ' (' + c.prov.hora + ')' : '') : fDiaHist(p.fecha, true)}</div>
     <div style="font-family:'JetBrains Mono',monospace;font-weight:800;font-size:14px;color:#E5E5E7">${f4(p.vcp * c.escala)}</div>
     <div style="color:#9A9AA0;margin-top:2px">Día <span style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${vd == null ? '—' : fPct(vd)}</span>
       · Período <span style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${fPct(vr)}</span></div>
-    ${c.bench ? `<div style="color:#9A9AA0;margin-top:2px">T-Bill 1 año <span style="font-family:'JetBrains Mono',monospace;color:#60A5FA">${fPct(c.bench[i] / c.bench[0] - 1)}</span>
+    ${c.bench && i < c.bench.length ? `<div style="color:#9A9AA0;margin-top:2px">T-Bill 1 año <span style="font-family:'JetBrains Mono',monospace;color:#60A5FA">${fPct(c.bench[i] / c.bench[0] - 1)}</span>
       · Dif. <span style="font-family:'JetBrains Mono',monospace;color:#E5E5E7">${f2((vr - (c.bench[i] / c.bench[0] - 1)) * 100)} pp</span></div>` : ''}`;
   tip.style.display = '';
   const wrapW = box.width, left = px / c.W * wrapW;
