@@ -1306,6 +1306,15 @@ function getBienesDeCambio(fundId) {
     .reduce((s, a) => s + a.val, 0);
 }
 
+// Ajustes del PDF que se cuentan como exposición en dólares (no en la moneda del fondo).
+// El importe sigue expresado en la moneda del fondo; solo cambia a qué moneda se asigna.
+const AJUSTES_USD_RE = /cr[eé]ditos\s+por\s+aportes/i;
+function getAjustesUSD(fundId) {
+  return (AJUSTES[fundId] || [])
+    .filter(a => AJUSTES_USD_RE.test(a.label || ''))
+    .reduce((s, a) => s + a.val, 0);
+}
+
 function toggleBreakdownBase(b) {
   state.breakdownBase = b;
   render();
@@ -1352,8 +1361,12 @@ function renderBreakdownPanel(fundId) {
         groups[it.monedaInstr] = (groups[it.monedaInstr] || 0) + it.monto;
       }
     }
-    // Liquidez en moneda del fondo
-    if (liquidez !== 0) groups[fondoMoneda] = (groups[fondoMoneda] || 0) + liquidez;
+    // Créditos por aportes → USD (no aplica en "Subtotal cartera", que excluye los ajustes)
+    const aportesUSD = useSub ? 0 : getAjustesUSD(fundId);
+    if (aportesUSD !== 0) groups['USD'] = (groups['USD'] || 0) + aportesUSD;
+    // Resto de la liquidez en moneda del fondo
+    const liqFondo = liquidez - aportesUSD;
+    if (Math.abs(liqFondo) > 0.5) groups[fondoMoneda] = (groups[fondoMoneda] || 0) + liqFondo;
 
   } else if (mode === 'tipo') {
     for (const it of items) {
@@ -2774,6 +2787,8 @@ function itemsExposicion(fundId) {
     categoria: i.meta?.categoria || 'Sin categoría', moneda: i.meta?.moneda || fondoMon,
     liq: esLiquidez(i.meta),
   }));
+  const aportesUSD = getAjustesUSD(fundId);
+  if (Math.abs(aportesUSD) > 0.5) items.push({ ticker: 'Créditos por aportes', monto: aportesUSD, tipo: 'Liquidez', categoria: 'Liquidez', moneda: 'USD', liq: true, _aportes: true });
   const resto = pn - items.reduce((s, i) => s + i.monto, 0);
   if (Math.abs(resto) > 0.5) items.push({ ticker: 'Disponibilidades y otros', monto: resto, tipo: 'Liquidez', categoria: 'Liquidez', moneda: fondoMon, liq: true, _otros: true });
   return { items, pn };
@@ -2784,7 +2799,7 @@ function pesosDe(items, pn) {
   if (!(pn > 0)) return out;
   for (const i of items) {
     const w = i.monto / pn;
-    if (!i._otros) out.activo[i.ticker] = (out.activo[i.ticker] || 0) + w;
+    if (!i._otros && !i._aportes) out.activo[i.ticker] = (out.activo[i.ticker] || 0) + w;
     out.tipo[i.tipo] = (out.tipo[i.tipo] || 0) + w;
     out.moneda[i.moneda] = (out.moneda[i.moneda] || 0) + w;
     out.categoria[i.categoria] = (out.categoria[i.categoria] || 0) + w;
@@ -2959,7 +2974,7 @@ function simAplicar(fundId) {
       it.monto += monto;
       if (op.fondeo === 'aporte') pn += monto;
       else {
-        const liq = items.filter(i => i.liq && !i._otros && i !== it && i.monto > 0);
+        const liq = items.filter(i => i.liq && !i._otros && !i._aportes && i !== it && i.monto > 0);
         const tot = liq.reduce((s, i) => s + i.monto, 0);
         const deLiq = Math.min(monto, tot);
         liq.forEach(i => { i.monto -= deLiq * i.monto / tot; });
