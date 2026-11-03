@@ -747,6 +747,8 @@ async function cargarMeta() {
           rows = await sbGet(`/${tabla}?select=ticker,nombre,tipo_activo,categoria,moneda,fuente_precio,live_symbol,tasa,lamina,base`);
         }
         const fondoMeta = {};
+        const realTickers = new Set(rows.map(r => r.ticker));
+        const aliases = [];
         for (const r of rows) {
           const fuente = r.fuente_precio || 'hold';
           const kind   = FUENTE_KIND[fuente] || 'hold';
@@ -765,7 +767,12 @@ async function cargarMeta() {
             precioInicial: r.precio_inicial != null ? parseFloat(r.precio_inicial) : null,
           };
           fondoMeta[r.ticker] = entry;
-          if (r.live_symbol && r.live_symbol !== r.ticker) fondoMeta[r.live_symbol] = entry;
+          if (r.live_symbol && r.live_symbol !== r.ticker) aliases.push([r.live_symbol, entry]);
+        }
+        // Alias por live_symbol: solo si no existe un activo real con ese ticker
+        // (ej. GGALD tiene live_symbol GGAL y no debe pisar al ADR GGAL)
+        for (const [alias, entry] of aliases) {
+          if (!realTickers.has(alias) && !fondoMeta[alias]) fondoMeta[alias] = entry;
         }
         meta[fundId] = fondoMeta;
       } catch (e) {
