@@ -1315,10 +1315,16 @@ function getBienesDeCambio(fundId) {
 
 // Ajustes del PDF que se cuentan como exposición en dólares (no en la moneda del fondo).
 // El importe sigue expresado en la moneda del fondo; solo cambia a qué moneda se asigna.
+// PNIZF: "Disponibilidades" es en realidad un pagaré hard dollar mal contabilizado → USD.
 const AJUSTES_USD_RE = /cr[eé]ditos\s+por\s+aportes/i;
+const AJUSTES_USD_RE_FONDO = { PNIZF: /disponibilidades/i };
+function esAjusteUSD(fundId, label) {
+  const l = label || '';
+  return AJUSTES_USD_RE.test(l) || !!AJUSTES_USD_RE_FONDO[fundId]?.test(l);
+}
 function getAjustesUSD(fundId) {
   return (AJUSTES[fundId] || [])
-    .filter(a => AJUSTES_USD_RE.test(a.label || ''))
+    .filter(a => esAjusteUSD(fundId, a.label))
     .reduce((s, a) => s + a.val, 0);
 }
 
@@ -1368,7 +1374,7 @@ function renderBreakdownPanel(fundId) {
         groups[it.monedaInstr] = (groups[it.monedaInstr] || 0) + it.monto;
       }
     }
-    // Créditos por aportes → USD (no aplica en "Subtotal cartera", que excluye los ajustes)
+    // Ajustes USD (créditos por aportes; en PNIZF también disponibilidades) → USD (no aplica en "Subtotal cartera", que excluye los ajustes)
     const aportesUSD = useSub ? 0 : getAjustesUSD(fundId);
     if (aportesUSD !== 0) groups['USD'] = (groups['USD'] || 0) + aportesUSD;
     // Resto de la liquidez en moneda del fondo
@@ -2795,7 +2801,7 @@ function itemsExposicion(fundId) {
     liq: esLiquidez(i.meta),
   }));
   const aportesUSD = getAjustesUSD(fundId);
-  if (Math.abs(aportesUSD) > 0.5) items.push({ ticker: 'Créditos por aportes', monto: aportesUSD, tipo: 'Liquidez', categoria: 'Liquidez', moneda: 'USD', liq: true, _aportes: true });
+  if (Math.abs(aportesUSD) > 0.5) items.push({ ticker: AJUSTES_USD_RE_FONDO[fundId] ? 'Ajustes en USD (aportes / pagaré HD)' : 'Créditos por aportes', monto: aportesUSD, tipo: 'Liquidez', categoria: 'Liquidez', moneda: 'USD', liq: true, _aportes: true });
   const resto = pn - items.reduce((s, i) => s + i.monto, 0);
   if (Math.abs(resto) > 0.5) items.push({ ticker: 'Disponibilidades y otros', monto: resto, tipo: 'Liquidez', categoria: 'Liquidez', moneda: fondoMon, liq: true, _otros: true });
   return { items, pn };
